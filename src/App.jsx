@@ -1,15 +1,23 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  createCustomerCartOrders,
   authenticateLocalUser,
+  changeInitialAdminPassword,
   createOrder,
   deleteProduct,
+  ensureDefaultAdminAccount,
   getOrders,
   getProducts,
   getLocalUserProfile,
+  getBusyTransporterEmails,
   getShopProfile,
+  getTransporterUsers,
   registerLocalUser,
   saveProduct,
   saveShopProfile,
+  saveShopTransporters,
+  updateLocalUserProfile,
+  updateOrderTransporter,
   updateOrderStatus,
 } from './services/localAuth'
 import ProductsPage from './components/ProductsPage'
@@ -17,8 +25,42 @@ import OrdersPage, { OrdersTable } from './components/OrdersPage'
 import CustomerCatalogPage from './components/CustomerCatalogPage'
 import CustomerOrdersPage from './components/CustomerOrdersPage'
 import MerchantBackupPage from './components/MerchantBackupPage'
+import LandingOffersSection from './components/LandingOffersSection'
+import OffersCart from './components/OffersCart'
+import MerchantTransportersPage from './components/MerchantTransportersPage'
+import TransporterOrdersPage from './components/TransporterOrdersPage'
+import UserProfilePage from './components/UserProfilePage'
+import AdminTrainingPage from './components/AdminTrainingPage'
 import { formatCurrency } from './utils/formatters'
 import './App.css'
+
+function readSavedOffersCart() {
+  try {
+    const savedCart = localStorage.getItem('ferrolink-offers-cart')
+    if (!savedCart) return { items: [], notice: '' }
+
+    const parsedCart = JSON.parse(savedCart)
+    const validCart = Array.isArray(parsedCart) && parsedCart.every((item) => item
+      && item.product
+      && typeof item.product.id === 'string'
+      && typeof item.product.name === 'string'
+      && typeof item.product.shopName === 'string'
+      && Number.isFinite(item.product.offerPrice)
+      && item.product.offerPrice >= 0
+      && Number.isInteger(item.product.stock)
+      && item.product.stock > 0
+      && Number.isInteger(item.quantity)
+      && item.quantity > 0
+      && item.quantity <= item.product.stock)
+    if (!validCart) throw new Error('El carrito guardado no tiene un formato válido.')
+    return { items: parsedCart, notice: '' }
+  } catch (error) {
+    return {
+      items: [],
+      notice: error instanceof Error ? error.message : 'No se pudo cargar el carrito guardado.',
+    }
+  }
+}
 
 function BrandMark() {
   return (
@@ -58,7 +100,19 @@ function Brand({ light = false }) {
   )
 }
 
-function LandingPage({ onLogin }) {
+function LandingPage({
+  onLogin,
+  cart,
+  cartNotice,
+  cartOpen,
+  onOpenCart,
+  onCloseCart,
+  onAddToCart,
+  onChangeCartQuantity,
+  onRemoveFromCart,
+}) {
+  const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0)
+
   return (
     <>
       <header className="site-header">
@@ -67,11 +121,15 @@ function LandingPage({ onLogin }) {
         </a>
         <nav className="main-nav" aria-label="Navegación principal">
           <a href="#oferta">Qué ofrecemos</a>
+          <a href="#ofertas">Ofertas</a>
           <a href="#para-quien">Para quién</a>
           <a href="#involucrados">Involucrados</a>
           <a href="#contacto">Contacto</a>
         </nav>
         <div className="header-actions">
+          <button className="landing-cart-button" type="button" onClick={onOpenCart} aria-label={`Abrir carrito, ${cartCount} ${cartCount === 1 ? 'producto' : 'productos'}`}>
+            <span aria-hidden="true">▤</span> Carrito <span className="landing-cart-count">{cartCount}</span>
+          </button>
           <button className="text-button" type="button" onClick={onLogin}>Iniciar sesión</button>
           <button className="button button-small" type="button" onClick={onLogin}>
             Acceder <ArrowIcon />
@@ -157,6 +215,8 @@ function LandingPage({ onLogin }) {
           </div>
         </section>
 
+        <LandingOffersSection onAddToCart={onAddToCart} cart={cart} cartNotice={cartNotice} />
+
         <section className="audience-section" id="para-quien">
           <div className="section-intro">
             <p className="eyebrow">PARA QUIÉN ES</p>
@@ -229,6 +289,16 @@ function LandingPage({ onLogin }) {
         <span>Conectando cada parte de tu operación.</span>
         <span>© {new Date().getFullYear()} FerroLink</span>
       </footer>
+      {cartOpen && <OffersCart
+        cart={cart}
+        user={null}
+        cartNotice={cartNotice}
+        onChangeQuantity={onChangeCartQuantity}
+        onRemove={onRemoveFromCart}
+        onLogin={onLogin}
+        onClose={onCloseCart}
+        isDialog
+      />}
     </>
   )
 }
@@ -420,50 +490,120 @@ function LoginPage({ onBack, onAuthenticated, initialNotice = '' }) {
   )
 }
 
+function InitialAdminPasswordPage({ user, onPasswordChanged, onLogout }) {
+  const [notice, setNotice] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setNotice('')
+    const formData = new FormData(event.currentTarget)
+    const password = formData.get('newPassword')
+    if (password !== formData.get('confirmPassword')) {
+      setNotice('Las contraseñas no coinciden.')
+      return
+    }
+
+    setIsSaving(true)
+    try {
+      const profile = await changeInitialAdminPassword(user.email, password)
+      onPasswordChanged(profile)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'No se pudo actualizar la contraseña.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <main className="login-page">
+      <section className="login-showcase">
+        <div className="login-showcase-content">
+          <Brand light />
+          <p className="eyebrow">PROTECCIÓN DE LA CUENTA</p>
+          <h1>Un cambio necesario.<br /><span>Después, continúa.</span></h1>
+          <p>La contraseña inicial es temporal. Actualízala para acceder al portal de administración.</p>
+        </div>
+      </section>
+      <section className="login-panel">
+        <div className="login-form-wrap">
+          <div className="login-heading">
+            <span className="login-mark"><BrandMark /></span>
+            <p className="eyebrow">PRIMER ACCESO</p>
+            <h2>Crea una nueva contraseña</h2>
+            <p>Usa al menos 12 caracteres. Este paso es obligatorio antes de continuar.</p>
+          </div>
+          <form className="login-form" onSubmit={handleSubmit}>
+            <label htmlFor="admin-new-password">Nueva contraseña</label>
+            <input id="admin-new-password" name="newPassword" type="password" autoComplete="new-password" minLength={12} required />
+            <label htmlFor="admin-confirm-password">Confirmar contraseña</label>
+            <input id="admin-confirm-password" name="confirmPassword" type="password" autoComplete="new-password" minLength={12} required />
+            <button className="button login-submit" type="submit" disabled={isSaving}>
+              {isSaving ? 'Guardando...' : 'Guardar y continuar'}
+            </button>
+            <p className="form-notice" role="alert">{notice}</p>
+          </form>
+          <button className="auth-switch" type="button" onClick={onLogout}>Cerrar sesión</button>
+        </div>
+        <span className="login-copyright">© {new Date().getFullYear()} FerroLink</span>
+      </section>
+    </main>
+  )
+}
+
 const DASHBOARD_TABS = [
   { id: 'overview', label: 'Resumen', icon: '▦' },
   { id: 'products', label: 'Productos', icon: '▤' },
   { id: 'orders', label: 'Pedidos', icon: '⇄' },
+  { id: 'transporters', label: 'Camioneros', icon: '↗' },
   { id: 'shop', label: 'Mi ferretería', icon: '⌂' },
   { id: 'backup', label: 'Respaldos', icon: '⇩' },
+  { id: 'profile', label: 'Mi perfil', icon: '◉' },
 ]
 
 const ROLE_LABELS = {
   merchant: 'Ferretería aliada',
   customer: 'Cliente o constructor',
   transporter: 'Transportista',
+  admin: 'Administrador',
 }
 
 const ROLE_TABS = {
   merchant: DASHBOARD_TABS,
   customer: [
     { id: 'overview', label: 'Inicio', icon: '▦' },
+    { id: 'offers', label: 'Ofertas', icon: '%' },
     { id: 'catalog', label: 'Buscar productos', icon: '⌕' },
+    { id: 'cart', label: 'Mi carrito', icon: '▤' },
     { id: 'my-orders', label: 'Mis pedidos', icon: '⇄' },
     { id: 'profile', label: 'Mi perfil', icon: '◉' },
   ],
   transporter: [
     { id: 'overview', label: 'Inicio', icon: '▦' },
-    { id: 'deliveries', label: 'Entregas disponibles', icon: '↗' },
+    { id: 'deliveries', label: 'Mis entregas', icon: '↗' },
     { id: 'delivery-history', label: 'Mi historial', icon: '◷' },
     { id: 'profile', label: 'Mi perfil', icon: '◉' },
   ],
 }
 
 async function fetchMerchantData(ownerEmail) {
-  const [shop, products, orders] = await Promise.all([
+  const [shop, products, orders, transporters, busyTransporterEmails] = await Promise.all([
     getShopProfile(ownerEmail),
     getProducts(ownerEmail),
     getOrders(ownerEmail),
+    getTransporterUsers(),
+    getBusyTransporterEmails(),
   ])
-  return { shop, products, orders }
+  return { shop, products, orders, transporters, busyTransporterEmails }
 }
 
-function MerchantDashboard({ user, onLogout, notice }) {
+function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
   const [activeTab, setActiveTab] = useState('overview')
   const [shop, setShop] = useState({ name: '', phone: '', address: '' })
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
+  const [transporters, setTransporters] = useState([])
+  const [busyTransporterEmails, setBusyTransporterEmails] = useState([])
   const [feedback, setFeedback] = useState(notice)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -474,6 +614,8 @@ function MerchantDashboard({ user, onLogout, notice }) {
       setShop(data.shop)
       setProducts(data.products)
       setOrders(data.orders)
+      setTransporters(data.transporters)
+      setBusyTransporterEmails(data.busyTransporterEmails)
       return true
     } catch (error) {
       setFeedback(error instanceof Error ? error.message : 'No se pudo cargar el panel.')
@@ -491,6 +633,8 @@ function MerchantDashboard({ user, onLogout, notice }) {
         setShop(data.shop)
         setProducts(data.products)
         setOrders(data.orders)
+        setTransporters(data.transporters)
+        setBusyTransporterEmails(data.busyTransporterEmails)
       })
       .catch((error) => {
         if (active) setFeedback(error instanceof Error ? error.message : 'No se pudo cargar el panel.')
@@ -551,6 +695,20 @@ function MerchantDashboard({ user, onLogout, notice }) {
     )
   }
 
+  async function handleOrderTransporterChange(order, transporterEmail) {
+    await performAction(
+      () => updateOrderTransporter(user.email, order.id, transporterEmail),
+      transporterEmail ? 'Camionero asignado al pedido.' : 'Camionero retirado del pedido.',
+    )
+  }
+
+  async function handleTransportersSave(transporterEmails) {
+    return performAction(
+      () => saveShopTransporters(user.email, transporterEmails),
+      'Transportistas asociados actualizados.',
+    )
+  }
+
   async function handleShopSave(event) {
     event.preventDefault()
     const formData = new FormData(event.currentTarget)
@@ -592,7 +750,14 @@ function MerchantDashboard({ user, onLogout, notice }) {
         <section className="dashboard-panel">
           <div className="panel-heading"><div><h2>Pedidos recientes</h2><p>Revisa su estado y continúa con la siguiente etapa.</p></div><button className="plain-link" type="button" onClick={() => setActiveTab('orders')}>Ver todos <ArrowIcon /></button></div>
           {recentOrders.length
-            ? <OrdersTable orders={recentOrders} onStatusChange={handleOrderStatus} />
+            ? <OrdersTable
+              orders={recentOrders}
+              allOrders={orders}
+              onStatusChange={handleOrderStatus}
+              transporters={transporters.filter((transporter) => shop.transporterEmails?.includes(transporter.email))}
+              busyTransporterEmails={busyTransporterEmails}
+              onTransporterChange={handleOrderTransporterChange}
+            />
             : <div className="compact-empty">Los pedidos que registres aparecerán aquí.</div>}
         </section>
       </>
@@ -662,19 +827,44 @@ function MerchantDashboard({ user, onLogout, notice }) {
             products={products}
             onCreateOrder={handleOrderCreate}
             onStatusChange={handleOrderStatus}
+            transporters={transporters.filter((transporter) => shop.transporterEmails?.includes(transporter.email))}
+            busyTransporterEmails={busyTransporterEmails}
+            onTransporterChange={handleOrderTransporterChange}
             isLoading={isLoading}
+            isSaving={isSaving}
+          />}
+          {activeTab === 'transporters' && <MerchantTransportersPage
+            key={`${transporters.map((transporter) => transporter.email).join(',')}|${shop.transporterEmails?.join(',') ?? ''}`}
+            transporters={transporters}
+            associatedEmails={shop.transporterEmails ?? []}
+            onSave={handleTransportersSave}
             isSaving={isSaving}
           />}
           {activeTab === 'shop' && renderShop()}
           {activeTab === 'backup' && renderBackup()}
+          {activeTab === 'profile' && <UserProfilePage user={user} onSave={onProfileUpdate} />}
         </div>
       </section>
     </main>
   )
 }
 
-function RoleDashboard({ user, onLogout, notice }) {
-  const [activeTab, setActiveTab] = useState('overview')
+function RoleDashboard({
+  user,
+  onLogout,
+  notice,
+  onProfileUpdate,
+  cart,
+  cartNotice,
+  onChangeCartQuantity,
+  onRemoveFromCart,
+  onAddToCart,
+  onCartCheckout,
+}) {
+  const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0)
+  const [activeTab, setActiveTab] = useState(
+    () => user.role === 'customer' && cart.length ? 'cart' : 'overview',
+  )
   const tabs = ROLE_TABS[user.role]
   const selectedTab = tabs.find((tab) => tab.id === activeTab) ?? tabs[0]
   const roleContent = {
@@ -683,7 +873,9 @@ function RoleDashboard({ user, onLogout, notice }) {
       title: 'Encuentra lo que necesitas para tu proyecto.',
       description: 'Consulta la oferta de ferreterías y mantén tus compras organizadas.',
       cards: [
+        ['offers', '%', 'Explora ofertas', 'Descubre promociones vigentes sin salir de tu cuenta.'],
         ['catalog', '⌕', 'Busca materiales', 'Explora productos disponibles en las ferreterías aliadas.'],
+        ['cart', '▤', 'Revisa tu carrito', 'Confirma las ofertas que agregaste y realiza tu pedido.'],
         ['my-orders', '⇄', 'Sigue tus pedidos', 'Consulta el avance de tus compras y entregas.'],
         ['profile', '⌂', 'Organiza tus proyectos', 'Mantén tus datos a mano para futuras compras.'],
       ],
@@ -697,8 +889,8 @@ function RoleDashboard({ user, onLogout, notice }) {
       title: 'Conecta con nuevas oportunidades de entrega.',
       description: 'Organiza tus entregas y mantén a la mano la información de cada recorrido.',
       cards: [
-        ['deliveries', '↗', 'Encuentra entregas', 'Consulta solicitudes de transporte de ferreterías aliadas.'],
-        ['delivery-history', '◷', 'Actualiza recorridos', 'Mantén al día las etapas de preparación y entrega.'],
+        ['deliveries', '↗', 'Revisa tus entregas', 'Consulta los pedidos que las ferreterías te han asignado.'],
+        ['delivery-history', '◷', 'Consulta tu historial', 'Revisa las entregas finalizadas que estuvieron a tu cargo.'],
         ['profile', '⌂', 'Gestiona tu perfil', 'Ten visibles tus datos de contacto para coordinar.'],
       ],
       sections: {
@@ -709,6 +901,10 @@ function RoleDashboard({ user, onLogout, notice }) {
   }[user.role]
 
   function renderRoleContent() {
+    if (user.role === 'customer' && activeTab === 'offers') {
+      return <LandingOffersSection onAddToCart={onAddToCart} cart={cart} cartNotice={cartNotice} />
+    }
+
     if (user.role === 'customer' && activeTab === 'catalog') {
       return <CustomerCatalogPage user={user} />
     }
@@ -717,17 +913,28 @@ function RoleDashboard({ user, onLogout, notice }) {
       return <CustomerOrdersPage user={user} />
     }
 
+    if (user.role === 'customer' && activeTab === 'cart') {
+      return <OffersCart
+        cart={cart}
+        user={user}
+        cartNotice={cartNotice}
+        onChangeQuantity={onChangeCartQuantity}
+        onRemove={onRemoveFromCart}
+        onCheckout={onCartCheckout}
+        onContinue={() => setActiveTab('offers')}
+      />
+    }
+
+    if (user.role === 'transporter' && activeTab === 'deliveries') {
+      return <TransporterOrdersPage user={user} />
+    }
+
+    if (user.role === 'transporter' && activeTab === 'delivery-history') {
+      return <TransporterOrdersPage user={user} history />
+    }
+
     if (activeTab === 'profile') {
-      return (
-        <section className="dashboard-panel role-profile-panel">
-          <div className="panel-heading"><div><h2>Datos de la cuenta</h2><p>Información asociada a tu perfil.</p></div></div>
-          <div className="role-profile-details">
-            <div><span>Nombre</span><strong>{user.name}</strong></div>
-            <div><span>Correo electrónico</span><strong>{user.email}</strong></div>
-            <div><span>Tipo de usuario</span><strong>{ROLE_LABELS[user.role]}</strong></div>
-          </div>
-        </section>
-      )
+      return <UserProfilePage user={user} onSave={onProfileUpdate} />
     }
 
     if (activeTab !== 'overview') {
@@ -778,6 +985,7 @@ function RoleDashboard({ user, onLogout, notice }) {
           {tabs.map((tab) => (
             <button className={activeTab === tab.id ? 'dashboard-nav-item selected' : 'dashboard-nav-item'} type="button" key={tab.id} onClick={() => setActiveTab(tab.id)}>
               <span className="nav-icon" aria-hidden="true">{tab.icon}</span>{tab.label}
+              {tab.id === 'cart' && cartCount > 0 && <span className="nav-counter">{cartCount}</span>}
             </button>
           ))}
           <button className="dashboard-nav-item dashboard-nav-logout" type="button" onClick={onLogout}>
@@ -801,15 +1009,56 @@ function RoleDashboard({ user, onLogout, notice }) {
   )
 }
 
+function AdminDashboard({ user, onLogout }) {
+  return (
+    <main className="merchant-app role-app">
+      <aside className="dashboard-sidebar">
+        <a className="brand-link dashboard-brand" href="#panel"><Brand /></a>
+        <div className="sidebar-caption">ADMINISTRACIÓN</div>
+        <nav className="dashboard-nav" aria-label="Menú de administración">
+          <span className="dashboard-nav-item selected"><span className="nav-icon" aria-hidden="true">⌕</span>Modelo visual</span>
+          <button className="dashboard-nav-item dashboard-nav-logout" type="button" onClick={onLogout}>
+            <span className="nav-icon" aria-hidden="true">↗</span>Cerrar sesión
+          </button>
+        </nav>
+        <div className="sidebar-bottom">
+          <span className="sidebar-avatar">{user.name.slice(0, 1).toUpperCase()}</span>
+          <span className="sidebar-user"><strong>{user.name}</strong><small>{ROLE_LABELS.admin}</small></span>
+          <button className="sidebar-logout" type="button" onClick={onLogout} aria-label="Cerrar sesión" title="Cerrar sesión">↗</button>
+        </div>
+      </aside>
+      <section className="dashboard-main" id="panel">
+        <header className="dashboard-topbar"><div className="dashboard-breadcrumb">FerroLink <span>/</span> Modelo visual</div><div className="topbar-profile"><span className="online-indicator" /> Sesión activa</div></header>
+        <div className="dashboard-content"><AdminTrainingPage /></div>
+      </section>
+    </main>
+  )
+}
+
 function App() {
   const [page, setPage] = useState('landing')
   const [user, setUser] = useState(null)
   const [sessionNotice, setSessionNotice] = useState('')
+  const [isInitializing, setIsInitializing] = useState(true)
+  const [initialCart] = useState(readSavedOffersCart)
+  const [cart, setCart] = useState(initialCart.items)
+  const [cartNotice, setCartNotice] = useState(initialCart.notice)
+  const [cartOpen, setCartOpen] = useState(false)
 
   useEffect(() => {
     let active = true
 
     async function restoreSession() {
+      try {
+        await ensureDefaultAdminAccount()
+      } catch (error) {
+        if (active) {
+          setSessionNotice(error instanceof Error
+            ? error.message
+            : 'No se pudo inicializar la cuenta administradora.')
+        }
+      }
+
       try {
         const savedSession = localStorage.getItem('ferrolink-session')
           ?? sessionStorage.getItem('ferrolink-session')
@@ -826,11 +1075,15 @@ function App() {
         }
 
         if (active) setUser(profile)
-      } catch {
+      } catch (error) {
         if (active) {
           setPage('login')
-          setSessionNotice('No se pudo restaurar tu sesión. Inicia sesión nuevamente.')
+          setSessionNotice(error instanceof Error
+            ? `No se pudo restaurar tu sesión. ${error.message}`
+            : 'No se pudo restaurar tu sesión. Inicia sesión nuevamente.')
         }
+      } finally {
+        if (active) setIsInitializing(false)
       }
     }
 
@@ -847,6 +1100,88 @@ function App() {
     setUser(profile)
   }
 
+  async function handleProfileUpdate(name) {
+    const updatedProfile = await updateLocalUserProfile(user.email, { name })
+    setUser(updatedProfile)
+    return updatedProfile
+  }
+
+  function saveCart(nextCart, notice = '') {
+    try {
+      localStorage.setItem('ferrolink-offers-cart', JSON.stringify(nextCart))
+      setCart(nextCart)
+      setCartNotice(notice)
+      return true
+    } catch {
+      setCart(nextCart)
+      setCartNotice('No se pudo guardar el carrito en este navegador; se conservará solo hasta cerrar esta pestaña.')
+      return false
+    }
+  }
+
+  function handleAddToCart(product) {
+    const currentItem = cart.find((item) => item.product.id === product.id)
+    if (!Number.isInteger(product.stock) || product.stock < 1) {
+      setCartNotice('Esta oferta ya no tiene existencias disponibles.')
+      return false
+    }
+    if (!currentItem && cart.length >= 100) {
+      setCartNotice('El carrito admite hasta 100 productos distintos por pedido.')
+      return false
+    }
+    const quantity = Math.min((currentItem?.quantity ?? 0) + 1, product.stock)
+    const cartProduct = {
+      id: product.id,
+      name: product.name,
+      shopName: product.shopName,
+      offerPrice: product.offerPrice,
+      offerDescription: product.offerDescription,
+      offerStartDate: product.offerStartDate,
+      offerEndDate: product.offerEndDate,
+      stock: product.stock,
+      category: product.category,
+    }
+    const nextCart = currentItem
+      ? cart.map((item) => item.product.id === product.id
+        ? { product: cartProduct, quantity }
+        : item)
+      : [...cart, { product: cartProduct, quantity: 1 }]
+    return saveCart(nextCart, currentItem?.quantity >= product.stock
+      ? 'Ya agregaste todas las existencias disponibles de esta oferta.'
+      : `${product.name} se agregó al carrito.`)
+  }
+
+  function handleCartQuantityChange(productId, quantity) {
+    const item = cart.find((entry) => entry.product.id === productId)
+    if (!item || !Number.isInteger(quantity) || quantity < 1 || quantity > item.product.stock) return
+    saveCart(cart.map((entry) => entry.product.id === productId ? { ...entry, quantity } : entry))
+  }
+
+  function handleCartRemove(productId) {
+    saveCart(cart.filter((item) => item.product.id !== productId), 'Producto eliminado del carrito.')
+  }
+
+  async function handleCartCheckout(details) {
+    const orders = await createCustomerCartOrders(
+      user.email,
+      details,
+      cart.map((item) => ({
+        productId: item.product.id,
+        quantity: item.quantity,
+        expectedOfferPrice: item.product.offerPrice,
+      })),
+    )
+    let warning = ''
+    try {
+      localStorage.removeItem('ferrolink-offers-cart')
+    } catch {
+      warning = 'No se pudo borrar el carrito guardado en el navegador; revisa que no vuelva a aparecer al recargar.'
+    }
+    setCart([])
+    setCartNotice(warning)
+    return { orders, warning }
+  }
+
   function handleLogout() {
     try {
       localStorage.removeItem('ferrolink-session')
@@ -858,12 +1193,38 @@ function App() {
     }
   }
 
+  if (isInitializing) {
+    return <main className="login-page"><section className="login-panel"><p className="form-notice" role="status">Preparando FerroLink...</p></section></main>
+  }
+
+  if (user?.requiresPasswordChange) {
+    return <InitialAdminPasswordPage
+      user={user}
+      onPasswordChanged={setUser}
+      onLogout={handleLogout}
+    />
+  }
+
   if (user) {
+    if (user.role === 'admin') {
+      return <AdminDashboard user={user} onLogout={handleLogout} />
+    }
     const role = ['merchant', 'customer', 'transporter'].includes(user.role) ? user.role : 'merchant'
     const account = { ...user, role }
     return role === 'merchant'
-      ? <MerchantDashboard user={account} onLogout={handleLogout} notice={sessionNotice} />
-      : <RoleDashboard user={account} onLogout={handleLogout} notice={sessionNotice} />
+      ? <MerchantDashboard user={account} onLogout={handleLogout} notice={sessionNotice} onProfileUpdate={handleProfileUpdate} />
+      : <RoleDashboard
+        user={account}
+        onLogout={handleLogout}
+        notice={sessionNotice}
+        onProfileUpdate={handleProfileUpdate}
+        cart={cart}
+        cartNotice={cartNotice}
+        onChangeCartQuantity={handleCartQuantityChange}
+        onRemoveFromCart={handleCartRemove}
+        onAddToCart={handleAddToCart}
+        onCartCheckout={handleCartCheckout}
+      />
   }
 
   return page === 'login'
@@ -872,7 +1233,17 @@ function App() {
       onAuthenticated={handleAuthenticated}
       initialNotice={sessionNotice}
     />
-    : <LandingPage onLogin={() => setPage('login')} />
+    : <LandingPage
+      onLogin={() => { setCartOpen(false); setPage('login') }}
+      cart={cart}
+      cartNotice={cartNotice}
+      cartOpen={cartOpen}
+      onOpenCart={() => setCartOpen(true)}
+      onCloseCart={() => setCartOpen(false)}
+      onAddToCart={handleAddToCart}
+      onChangeCartQuantity={handleCartQuantityChange}
+      onRemoveFromCart={handleCartRemove}
+    />
 }
 
 export default App

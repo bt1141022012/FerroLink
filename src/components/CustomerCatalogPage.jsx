@@ -97,6 +97,9 @@ export default function CustomerCatalogPage({ user }) {
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [message, setMessage] = useState('')
+  const [visualResults, setVisualResults] = useState([])
+  const [isSearchingByImage, setIsSearchingByImage] = useState(false)
+  const [visualError, setVisualError] = useState('')
 
   useEffect(() => {
     let active = true
@@ -116,13 +119,46 @@ export default function CustomerCatalogPage({ user }) {
     const normalizedSearch = search.trim().toLocaleLowerCase('es')
     return products.filter((product) => {
       const matchesCategory = category === 'Todas' || product.category === category
+      const matchesImage = !visualResults.length
+        || visualResults.some((result) => result.productId === product.id)
       const matchesSearch = !normalizedSearch
         || `${product.name} ${product.category} ${product.sku} ${product.shopName}`
           .toLocaleLowerCase('es')
           .includes(normalizedSearch)
-      return matchesCategory && matchesSearch
+      return matchesCategory && matchesSearch && matchesImage
     })
-  }, [category, products, search])
+  }, [category, products, search, visualResults])
+
+  async function handleVisualSearch(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    setVisualError('')
+    setVisualResults([])
+    setIsSearchingByImage(true)
+    try {
+      const { findProductsByImage } = await import('../services/productImageModel')
+      const predictions = await findProductsByImage(file)
+      const availableMatches = predictions
+        .map((prediction) => ({
+          ...prediction,
+          product: products.find((product) => product.id === prediction.productId),
+        }))
+        .filter((prediction) => prediction.product)
+      if (!availableMatches.length) {
+        setVisualError('No se encontraron coincidencias entre el modelo y los productos disponibles.')
+        return
+      }
+      setVisualResults(availableMatches)
+      setSearch('')
+      setCategory('Todas')
+    } catch (error) {
+      setVisualError(error instanceof Error ? error.message : 'No se pudo buscar con esa imagen.')
+    } finally {
+      setIsSearchingByImage(false)
+    }
+  }
 
   async function handleOrder(details) {
     setIsSaving(true)
@@ -150,12 +186,42 @@ export default function CustomerCatalogPage({ user }) {
           <span aria-hidden="true">⌕</span>
           <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar materiales, herramientas..." aria-label="Buscar productos" />
         </label>
+        <label className="visual-search-button">
+          <span aria-hidden="true">▧</span>
+          {isSearchingByImage ? 'Analizando...' : 'Buscar por foto'}
+          <input type="file" accept="image/*" onChange={handleVisualSearch} disabled={isSearchingByImage} aria-label="Buscar productos con una imagen" />
+        </label>
         <label className="market-category-label" htmlFor="market-category">Categoría</label>
         <select id="market-category" className="market-category" value={category} onChange={(event) => setCategory(event.target.value)}>
           {categories.map((option) => <option key={option}>{option}</option>)}
         </select>
         <span className="market-result-count">{visibleProducts.length} productos</span>
       </section>
+      {visualError && <div className="dashboard-feedback backup-error" role="alert"><span>!</span>{visualError}</div>}
+      {visualResults.length > 0 && (
+        <section className="visual-search-results" aria-label="Coincidencias de búsqueda visual">
+          <div className="visual-search-heading">
+            <div><strong>Coincidencias visuales</strong><span>Selecciona un producto para ver sus opciones disponibles.</span></div>
+            <button type="button" className="text-button" onClick={() => setVisualResults([])}>Mostrar todo</button>
+          </div>
+          <div className="visual-search-candidates">
+            {visualResults.map(({ productId, confidence, product }) => (
+              <button
+                type="button"
+                key={productId}
+                className="visual-search-candidate"
+                onClick={() => {
+                  setVisualResults([{ productId, product, confidence }])
+                  setSearch('')
+                }}
+              >
+                <strong>{product.name}</strong><span>{product.shopName}</span>
+                <small>{Math.round(confidence * 100)}% coincidencia</small>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       {message && <div className="dashboard-feedback" role="status"><span>✓</span>{message}<button type="button" onClick={() => setMessage('')} aria-label="Cerrar aviso">×</button></div>}
       {isLoading
         ? <div className="market-empty"><span className="market-loader" /><p>Cargando productos...</p></div>

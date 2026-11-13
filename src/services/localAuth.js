@@ -1,9 +1,13 @@
 const DATABASE_NAME = 'ferrolink-local'
-const DATABASE_VERSION = 3
+const DATABASE_VERSION = 4
 const USERS_STORE = 'users'
 const SHOPS_STORE = 'shops'
 const PRODUCTS_STORE = 'products'
 const ORDERS_STORE = 'orders'
+const IMAGE_EXAMPLES_STORE = 'imageExamples'
+const IMAGE_MODEL_STORE = 'imageModel'
+const ADMIN_EMAIL = 'admin@gmail.com'
+const ADMIN_INITIAL_PASSWORD = 'A123456789'
 const PASSWORD_ITERATIONS = 310_000
 const BACKUP_FORMAT = 'ferrolink-account-backup'
 const BACKUP_VERSION = 1
@@ -39,6 +43,12 @@ function openDatabase() {
         if (!orders.indexNames.contains('customerEmail')) {
           orders.createIndex('customerEmail', 'customerEmail', { unique: false })
         }
+      }
+      if (!database.objectStoreNames.contains(IMAGE_EXAMPLES_STORE)) {
+        database.createObjectStore(IMAGE_EXAMPLES_STORE, { keyPath: 'id' })
+      }
+      if (!database.objectStoreNames.contains(IMAGE_MODEL_STORE)) {
+        database.createObjectStore(IMAGE_MODEL_STORE, { keyPath: 'id' })
       }
     }
 
@@ -111,7 +121,12 @@ function passwordsMatch(actual, expected) {
 }
 
 function toProfile(user) {
-  return { name: user.name, email: user.email, role: user.role ?? 'merchant' }
+  return {
+    name: user.name,
+    email: user.email,
+    role: user.role ?? 'merchant',
+    requiresPasswordChange: user.requiresPasswordChange === true,
+  }
 }
 
 function createId() {
@@ -146,6 +161,19 @@ function validateStock(value) {
   return stock
 }
 
+function isValidDateOnly(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function getLocalDateOnly() {
+  const now = new Date()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${now.getFullYear()}-${month}-${day}`
+}
+
 async function getAccountRecords(storeName, ownerEmail) {
   const database = await openDatabase()
   try {
@@ -175,20 +203,124 @@ export async function getShopProfile(ownerEmail) {
 }
 
 export async function saveShopProfile(ownerEmail, details) {
-  const profile = {
-    ownerEmail,
-    name: normalizeText(details.name, 'El nombre de la ferretería', 120),
-    phone: details.phone.trim().slice(0, 40),
-    address: details.address.trim().slice(0, 180),
-    updatedAt: new Date().toISOString(),
-  }
   const database = await openDatabase()
   try {
     const transaction = database.transaction(SHOPS_STORE, 'readwrite')
     const completed = transactionComplete(transaction)
-    await requestResult(transaction.objectStore(SHOPS_STORE).put(profile))
+    const store = transaction.objectStore(SHOPS_STORE)
+    const existing = await requestResult(store.get(ownerEmail))
+    const profile = {
+      ...existing,
+      ownerEmail,
+      name: normalizeText(details.name, 'El nombre de la ferretería', 120),
+      phone: details.phone.trim().slice(0, 40),
+      address: details.address.trim().slice(0, 180),
+      transporterEmails: existing?.transporterEmails ?? [],
+      updatedAt: new Date().toISOString(),
+    }
+    await requestResult(store.put(profile))
     await completed
     return profile
+  } finally {
+    database.close()
+  }
+}
+
+export async function getTransporterUsers() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(USERS_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const users = await requestResult(transaction.objectStore(USERS_STORE).getAll())
+    await completed
+    return users
+      .filter((user) => user.role === 'transporter')
+      .map(toProfile)
+      .sort((left, right) => left.name.localeCompare(right.name))
+  } finally {
+    database.close()
+  }
+}
+
+export async function saveShopTransporters(ownerEmail, transporterEmails) {
+  if (!Array.isArray(transporterEmails)) {
+    throw new Error('Selecciona una lista válida de transportistas.')
+  }
+  const normalizedEmails = [...new Set(transporterEmails.map((email) => {
+    if (typeof email !== 'string') throw new Error('La selección contiene un transportista inválido.')
+    return email.trim().toLowerCase()
+  }))]
+  if (normalizedEmails.length > 200) {
+    throw new Error('La ferretería no puede asociar más de 200 transportistas.')
+  }
+
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction([USERS_STORE, SHOPS_STORE], 'readwrite')
+    const completed = transactionComplete(transaction)
+    const usersStore = transaction.objectStore(USERS_STORE)
+    const shopsStore = transaction.objectStore(SHOPS_STORE)
+    const usersRequest = usersStore.getAll()
+    const shopRequest = shopsStore.get(ownerEmail)
+    const [users, existingShop] = await Promise.all([
+      requestResult(usersRequest),
+      requestResult(shopRequest),
+    ])
+    const userRoles = new Map(users.map((user) => [user.email, user.role]))
+    if (normalizedEmails.some((email) => userRoles.get(email) !== 'transporter')) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Solo se pueden asociar cuentas registradas como transportistas.')
+    }
+
+    const profile = {
+      ...existingShop,
+      ownerEmail,
+      name: existingShop?.name ?? '',
+      phone: existingShop?.phone ?? '',
+      address: existingShop?.address ?? '',
+      transporterEmails: normalizedEmails,
+      updatedAt: new Date().toISOString(),
+    }
+    await requestResult(shopsStore.put(profile))
+    await completed
+    return users
+      .filter((user) => normalizedEmails.includes(user.email) && user.role === 'transporter')
+      .map(toProfile)
+      .sort((left, right) => left.name.localeCompare(right.name))
+  } finally {
+    database.close()
+  }
+}
+
+export async function getTransporterOrders(transporterEmail) {
+  const normalizedEmail = transporterEmail.trim().toLowerCase()
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(ORDERS_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const orders = await requestResult(transaction.objectStore(ORDERS_STORE).getAll())
+    await completed
+    return orders
+      .filter((order) => order.transporterEmail === normalizedEmail)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+  } finally {
+    database.close()
+  }
+}
+
+export async function getBusyTransporterEmails() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(ORDERS_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const orders = await requestResult(transaction.objectStore(ORDERS_STORE).getAll())
+    await completed
+    return [...new Set(orders
+      .filter((order) => order.transporterEmail
+        && !['Entregado', 'Cancelado'].includes(order.status)
+        && !['Entregado', 'No aceptado', 'Cancelado'].includes(order.deliveryStatus))
+      .map((order) => order.transporterEmail))]
   } finally {
     database.close()
   }
@@ -250,7 +382,13 @@ function validateAccountBackup(backup, ownerEmail) {
     throw new Error('El respaldo contiene listas de productos o pedidos inválidas.')
   }
   if (backup.shop !== null
-    && (!backup.shop || typeof backup.shop !== 'object' || backup.shop.ownerEmail !== ownerEmail)) {
+    && (!backup.shop
+      || typeof backup.shop !== 'object'
+      || backup.shop.ownerEmail !== ownerEmail
+      || (backup.shop.transporterEmails !== undefined
+        && (!Array.isArray(backup.shop.transporterEmails)
+          || backup.shop.transporterEmails.length > 200
+          || backup.shop.transporterEmails.some((email) => typeof email !== 'string'))))) {
     throw new Error('El perfil de ferretería del respaldo no es válido.')
   }
 
@@ -263,6 +401,16 @@ function validateAccountBackup(backup, ownerEmail) {
       || !Number.isFinite(product.price) || product.price < 0
       || !Number.isInteger(product.stock) || product.stock < 0
       || typeof product.available !== 'boolean'
+      || (product.isOffer !== undefined && typeof product.isOffer !== 'boolean')
+      || (product.isOffer === true
+        && (!isValidDateOnly(product.offerStartDate)
+          || !isValidDateOnly(product.offerEndDate)
+          || product.offerEndDate < product.offerStartDate
+          || !Number.isFinite(product.offerPrice)
+          || product.offerPrice < 0
+          || typeof product.offerDescription !== 'string'
+          || !product.offerDescription.trim()
+          || product.offerDescription.length > 240))
       || (product.image !== undefined
         && (typeof product.image !== 'string' || product.image.length > MAX_PRODUCT_IMAGE_LENGTH
           || !/^data:image\/(?:jpeg|png|webp);base64,/.test(product.image)))) {
@@ -281,7 +429,12 @@ function validateAccountBackup(backup, ownerEmail) {
       || !Number.isInteger(order.quantity) || order.quantity < 1
       || !Number.isFinite(order.total) || order.total < 0
       || !statuses.includes(order.status)
-      || (order.customerEmail !== undefined && typeof order.customerEmail !== 'string')) {
+      || (order.customerEmail !== undefined && typeof order.customerEmail !== 'string')
+      || (order.transporterEmail !== undefined && typeof order.transporterEmail !== 'string')
+      || (order.transporterName !== undefined && typeof order.transporterName !== 'string')
+      || (order.deliveryStatus !== undefined
+        && !['Pendiente de aceptación', 'Aceptado', 'En camino', 'Entregado', 'No aceptado', 'Cancelado', '']
+          .includes(order.deliveryStatus))) {
       throw new Error('El respaldo contiene datos de pedido inválidos.')
     }
     orderIds.add(order.id)
@@ -357,6 +510,134 @@ export async function getPublicCatalogProducts() {
   }
 }
 
+export async function getActiveOffers() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction([PRODUCTS_STORE, SHOPS_STORE], 'readonly')
+    const completed = transactionComplete(transaction)
+    const productsRequest = transaction.objectStore(PRODUCTS_STORE).getAll()
+    const shopsRequest = transaction.objectStore(SHOPS_STORE).getAll()
+    const [products, shops] = await Promise.all([
+      requestResult(productsRequest),
+      requestResult(shopsRequest),
+    ])
+    await completed
+
+    const today = getLocalDateOnly()
+    const shopNames = new Map(shops.map((shop) => [shop.ownerEmail, shop.name]))
+    return products
+      .filter((product) => product.isOffer === true
+        && product.available
+        && product.stock > 0
+        && Number.isFinite(product.offerPrice)
+        && typeof product.offerDescription === 'string'
+        && product.offerDescription.trim()
+        && isValidDateOnly(product.offerStartDate)
+        && isValidDateOnly(product.offerEndDate)
+        && product.offerStartDate <= today
+        && product.offerEndDate >= today)
+      .map((product) => ({
+        ...product,
+        shopName: shopNames.get(product.ownerEmail) || 'Ferretería aliada',
+      }))
+      .sort((left, right) => left.offerEndDate.localeCompare(right.offerEndDate)
+        || left.name.localeCompare(right.name))
+  } finally {
+    database.close()
+  }
+}
+
+export async function getImageTrainingExamples() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_EXAMPLES_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const examples = await requestResult(transaction.objectStore(IMAGE_EXAMPLES_STORE).getAll())
+    await completed
+    return examples.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  } finally {
+    database.close()
+  }
+}
+
+export async function saveImageTrainingExample(productId, productName, embedding) {
+  if (typeof productId !== 'string' || !productId
+    || typeof productName !== 'string' || !productName.trim() || productName.length > 120
+    || !Array.isArray(embedding) || embedding.length < 1 || embedding.length > 4096
+    || embedding.some((value) => !Number.isFinite(value))) {
+    throw new Error('La imagen o el producto seleccionado no son válidos para entrenar.')
+  }
+
+  const example = {
+    id: createId(),
+    productId,
+    productName: productName.trim(),
+    embedding,
+    createdAt: new Date().toISOString(),
+  }
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_EXAMPLES_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    await requestResult(transaction.objectStore(IMAGE_EXAMPLES_STORE).add(example))
+    await completed
+    return example
+  } finally {
+    database.close()
+  }
+}
+
+export async function deleteImageTrainingExample(exampleId) {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_EXAMPLES_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    await requestResult(transaction.objectStore(IMAGE_EXAMPLES_STORE).delete(exampleId))
+    await completed
+  } finally {
+    database.close()
+  }
+}
+
+export async function getImageModelMetadata() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_MODEL_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const metadata = await requestResult(
+      transaction.objectStore(IMAGE_MODEL_STORE).get('product-image-classifier'),
+    )
+    await completed
+    return metadata ?? null
+  } finally {
+    database.close()
+  }
+}
+
+export async function saveImageModelMetadata(metadata) {
+  if (!metadata || !Array.isArray(metadata.classes) || metadata.classes.length < 2
+    || metadata.classes.some((item) => typeof item.productId !== 'string'
+      || typeof item.productName !== 'string')
+    || !Number.isInteger(metadata.exampleCount) || metadata.exampleCount < 1) {
+    throw new Error('Los datos del modelo de búsqueda visual no son válidos.')
+  }
+  const record = {
+    ...metadata,
+    id: 'product-image-classifier',
+    trainedAt: new Date().toISOString(),
+  }
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_MODEL_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    await requestResult(transaction.objectStore(IMAGE_MODEL_STORE).put(record))
+    await completed
+    return record
+  } finally {
+    database.close()
+  }
+}
+
 export async function saveProduct(ownerEmail, productDetails) {
   const name = normalizeText(productDetails.name, 'El nombre del producto', 120)
   const category = normalizeText(productDetails.category, 'La categoría', 80)
@@ -368,6 +649,23 @@ export async function saveProduct(ownerEmail, productDetails) {
     || (image && !/^data:image\/(?:jpeg|png|webp);base64,/.test(image)))) {
     throw new Error('La imagen debe ser JPG, PNG o WebP y no superar el límite permitido.')
   }
+  const isOffer = productDetails.isOffer === true
+  const offerStartDate = isOffer ? productDetails.offerStartDate : ''
+  const offerEndDate = isOffer ? productDetails.offerEndDate : ''
+  if (isOffer && (!isValidDateOnly(offerStartDate)
+    || !isValidDateOnly(offerEndDate)
+    || offerEndDate < offerStartDate)) {
+    throw new Error('Ingresa un rango de fechas válido para la oferta.')
+  }
+  if (isOffer && (productDetails.offerPrice === undefined
+    || productDetails.offerPrice === null
+    || productDetails.offerPrice === '')) {
+    throw new Error('Ingresa un precio de oferta válido.')
+  }
+  const offerPrice = isOffer ? validatePrice(productDetails.offerPrice) : null
+  const offerDescription = isOffer
+    ? normalizeText(productDetails.offerDescription, 'La descripción de la oferta', 240)
+    : ''
   const database = await openDatabase()
 
   try {
@@ -391,6 +689,11 @@ export async function saveProduct(ownerEmail, productDetails) {
       price,
       stock,
       available: productDetails.available ?? true,
+      isOffer,
+      offerPrice,
+      offerDescription,
+      offerStartDate,
+      offerEndDate,
       image: image ?? existing?.image ?? '',
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -541,6 +844,127 @@ export async function createCustomerOrder(customerEmail, details) {
   }
 }
 
+export async function createCustomerCartOrders(customerEmail, details, items) {
+  const normalizedEmail = customerEmail.trim().toLowerCase()
+  const customerName = normalizeText(details.customerName, 'El nombre del cliente', 120)
+  const deliveryAddress = normalizeText(details.deliveryAddress, 'La dirección de entrega', 180)
+  if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
+    throw new Error('El carrito no contiene productos válidos para realizar el pedido.')
+  }
+
+  const itemIds = new Set()
+  const requestedItems = items.map((item) => {
+    if (typeof item.productId !== 'string' || itemIds.has(item.productId)) {
+      throw new Error('El carrito contiene productos repetidos o inválidos.')
+    }
+    itemIds.add(item.productId)
+    const quantity = validateStock(item.quantity)
+    if (quantity < 1) throw new Error('La cantidad debe ser al menos uno.')
+    if (!Number.isFinite(item.expectedOfferPrice) || item.expectedOfferPrice < 0) {
+      throw new Error('El carrito contiene un precio de oferta inválido.')
+    }
+    return { productId: item.productId, quantity, expectedOfferPrice: item.expectedOfferPrice }
+  })
+
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(
+      [PRODUCTS_STORE, SHOPS_STORE, ORDERS_STORE],
+      'readwrite',
+    )
+    const productsStore = transaction.objectStore(PRODUCTS_STORE)
+    const shopsStore = transaction.objectStore(SHOPS_STORE)
+    const ordersStore = transaction.objectStore(ORDERS_STORE)
+    const completed = transactionComplete(transaction)
+    const today = getLocalDateOnly()
+    const lines = []
+    let remainingItems = requestedItems.length
+    let failureMessage = ''
+    let createdOrders = []
+
+    for (const requestedItem of requestedItems) {
+      const productRequest = productsStore.get(requestedItem.productId)
+      productRequest.onsuccess = () => {
+        if (failureMessage) return
+        const product = productRequest.result
+        if (!product || !product.available || product.stock < requestedItem.quantity) {
+          failureMessage = 'Un producto del carrito ya no está disponible o no tiene existencias suficientes.'
+          transaction.abort()
+          return
+        }
+
+        if (product.isOffer !== true
+          || !isValidDateOnly(product.offerStartDate)
+          || !isValidDateOnly(product.offerEndDate)
+          || product.offerStartDate > today
+          || product.offerEndDate < today
+          || !Number.isFinite(product.offerPrice)
+          || product.offerPrice < 0) {
+          failureMessage = `La oferta de "${product.name}" ya no está vigente. Actualiza el carrito.`
+          transaction.abort()
+          return
+        }
+        if (product.offerPrice !== requestedItem.expectedOfferPrice) {
+          failureMessage = `El precio de "${product.name}" cambió. Actualiza el carrito antes de pedir.`
+          transaction.abort()
+          return
+        }
+
+        const shopRequest = shopsStore.get(product.ownerEmail)
+        shopRequest.onsuccess = () => {
+          if (failureMessage) return
+          lines.push({ product, quantity: requestedItem.quantity, shop: shopRequest.result })
+          remainingItems -= 1
+          if (remainingItems !== 0) return
+
+          try {
+            const createdAt = new Date().toISOString()
+            createdOrders = lines.map(({ product: currentProduct, quantity, shop }) => {
+              currentProduct.stock -= quantity
+              currentProduct.updatedAt = createdAt
+              const unitPrice = currentProduct.offerPrice
+              const order = {
+                id: createId(),
+                ownerEmail: currentProduct.ownerEmail,
+                customerEmail: normalizedEmail,
+                customerName,
+                deliveryAddress,
+                productId: currentProduct.id,
+                productName: currentProduct.name,
+                shopName: shop?.name || 'Ferretería aliada',
+                quantity,
+                unitPrice,
+                total: Math.round(unitPrice * quantity * 100) / 100,
+                status: 'Recibido',
+                createdAt,
+                updatedAt: createdAt,
+              }
+              productsStore.put(currentProduct)
+              ordersStore.add(order)
+              return order
+            })
+          } catch (error) {
+            failureMessage = error instanceof Error
+              ? error.message
+              : 'No se pudieron preparar los pedidos del carrito.'
+            transaction.abort()
+          }
+        }
+      }
+    }
+
+    try {
+      await completed
+    } catch (error) {
+      if (failureMessage) throw new Error(failureMessage, { cause: error })
+      throw error
+    }
+    return createdOrders
+  } finally {
+    database.close()
+  }
+}
+
 export async function createOrder(ownerEmail, details) {
   const customerName = normalizeText(details.customerName, 'El nombre del cliente', 120)
   const deliveryAddress = details.deliveryAddress.trim().slice(0, 180)
@@ -646,6 +1070,7 @@ export async function updateOrderStatus(ownerEmail, orderId, status) {
             productsStore.put(product)
           }
           order.status = status
+          if (order.transporterEmail) order.deliveryStatus = 'Cancelado'
           order.updatedAt = new Date().toISOString()
           updatedOrder = order
           ordersStore.put(order)
@@ -656,6 +1081,7 @@ export async function updateOrderStatus(ownerEmail, orderId, status) {
           return
         }
         order.status = status
+        if (status === 'Entregado' && order.transporterEmail) order.deliveryStatus = 'Entregado'
         order.updatedAt = new Date().toISOString()
         updatedOrder = order
         ordersStore.put(order)
@@ -682,10 +1108,133 @@ export async function updateOrderStatus(ownerEmail, orderId, status) {
   }
 }
 
+export async function updateOrderTransporter(ownerEmail, orderId, transporterEmail) {
+  const normalizedEmail = transporterEmail ? transporterEmail.trim().toLowerCase() : ''
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(
+      [ORDERS_STORE, SHOPS_STORE, USERS_STORE],
+      'readwrite',
+    )
+    const completed = transactionComplete(transaction)
+    const ordersStore = transaction.objectStore(ORDERS_STORE)
+    const orderRequest = ordersStore.get(orderId)
+    const order = await requestResult(orderRequest)
+
+    if (!order || order.ownerEmail !== ownerEmail) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('No se encontró el pedido solicitado.')
+    }
+    if (['Entregado', 'Cancelado'].includes(order.status)) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('No se puede asignar un transportista a un pedido finalizado.')
+    }
+
+    let transporter = null
+    if (normalizedEmail) {
+      const shopRequest = transaction.objectStore(SHOPS_STORE).get(ownerEmail)
+      const userRequest = transaction.objectStore(USERS_STORE).get(normalizedEmail)
+      const [shop, user] = await Promise.all([
+        requestResult(shopRequest),
+        requestResult(userRequest),
+      ])
+      if (!Array.isArray(shop?.transporterEmails)
+        || !shop.transporterEmails.includes(normalizedEmail)) {
+        transaction.abort()
+        await completed.catch(() => {})
+        throw new Error('Asocia este transportista a tu ferretería antes de asignarlo al pedido.')
+      }
+      if (user?.role !== 'transporter') {
+        transaction.abort()
+        await completed.catch(() => {})
+        throw new Error('La cuenta seleccionada no está registrada como transportista.')
+      }
+      const allOrdersRequest = ordersStore.getAll()
+      const allOrders = await requestResult(allOrdersRequest)
+      const hasAnotherOpenOrder = allOrders.some((candidate) => candidate.id !== order.id
+        && candidate.transporterEmail === normalizedEmail
+        && !['Entregado', 'Cancelado'].includes(candidate.status)
+        && !['Entregado', 'No aceptado', 'Cancelado'].includes(candidate.deliveryStatus))
+      if (hasAnotherOpenOrder) {
+        transaction.abort()
+        await completed.catch(() => {})
+        throw new Error('Este camionero ya tiene otro pedido abierto. Asígnalo cuando termine o rechace esa entrega.')
+      }
+      transporter = user
+    }
+
+    const isSameTransporter = order.transporterEmail === transporter?.email
+    order.transporterEmail = transporter?.email ?? ''
+    order.transporterName = transporter?.name ?? ''
+    order.deliveryStatus = transporter
+      ? (isSameTransporter && !['No aceptado', 'Entregado', 'Cancelado'].includes(order.deliveryStatus)
+        ? order.deliveryStatus || 'Pendiente de aceptación'
+        : 'Pendiente de aceptación')
+      : ''
+    order.updatedAt = new Date().toISOString()
+    await requestResult(ordersStore.put(order))
+    await completed
+    return order
+  } finally {
+    database.close()
+  }
+}
+
+export async function updateTransporterOrderStatus(transporterEmail, orderId, status) {
+  const normalizedEmail = transporterEmail.trim().toLowerCase()
+  const transitions = {
+    'Pendiente de aceptación': ['Aceptado', 'No aceptado'],
+    Aceptado: ['En camino'],
+    'En camino': ['Entregado'],
+    Entregado: [],
+    'No aceptado': [],
+    Cancelado: [],
+  }
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(ORDERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    const store = transaction.objectStore(ORDERS_STORE)
+    const orderRequest = store.get(orderId)
+    const order = await requestResult(orderRequest)
+
+    if (!order || order.transporterEmail !== normalizedEmail) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Este pedido no está asignado a tu cuenta.')
+    }
+    if (['Entregado', 'Cancelado'].includes(order.status)) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Este pedido ya fue finalizado por la ferretería.')
+    }
+    const currentDeliveryStatus = order.deliveryStatus || 'Pendiente de aceptación'
+    if (!transitions[currentDeliveryStatus]?.includes(status)) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Ese cambio de estado no está permitido para esta entrega.')
+    }
+
+    order.deliveryStatus = status
+    if (status === 'Entregado') order.status = 'Entregado'
+    order.updatedAt = new Date().toISOString()
+    await requestResult(store.put(order))
+    await completed
+    return order
+  } finally {
+    database.close()
+  }
+}
+
 export async function registerLocalUser({ name, email, password, role }) {
   const normalizedName = name.trim()
   const normalizedEmail = email.trim().toLowerCase()
   const allowedRoles = ['customer', 'merchant', 'transporter']
+  if (normalizedEmail === ADMIN_EMAIL) {
+    throw new Error('Ese correo está reservado para la cuenta administradora.')
+  }
   if (normalizedName.length < 2 || normalizedName.length > 100) {
     throw new Error('El nombre debe tener entre 2 y 100 caracteres.')
   }
@@ -734,6 +1283,58 @@ export async function registerLocalUser({ name, email, password, role }) {
   }
 }
 
+export async function ensureDefaultAdminAccount() {
+  const database = await openDatabase()
+  try {
+    const readTransaction = database.transaction(USERS_STORE, 'readonly')
+    const readCompleted = transactionComplete(readTransaction)
+    const existing = await requestResult(
+      readTransaction.objectStore(USERS_STORE).get(ADMIN_EMAIL),
+    )
+    await readCompleted
+    if (existing) {
+      if (existing.role !== 'admin') {
+        throw new Error('El correo reservado del administrador ya pertenece a otra cuenta.')
+      }
+      return
+    }
+
+    if (!globalThis.crypto?.getRandomValues) {
+      throw new Error('Este navegador no ofrece la protección criptográfica requerida.')
+    }
+    const salt = globalThis.crypto.getRandomValues(new Uint8Array(16))
+    const passwordHash = await derivePasswordHash(ADMIN_INITIAL_PASSWORD, salt)
+    const transaction = database.transaction(USERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    try {
+      await requestResult(transaction.objectStore(USERS_STORE).add({
+        name: 'Administrador',
+        email: ADMIN_EMAIL,
+        role: 'admin',
+        requiresPasswordChange: true,
+        passwordSalt: encodeBytes(salt),
+        passwordHash: encodeBytes(passwordHash),
+        createdAt: new Date().toISOString(),
+      }))
+      await completed
+    } catch (error) {
+      await completed.catch(() => {})
+      if (error.name !== 'ConstraintError') throw error
+      const currentTransaction = database.transaction(USERS_STORE, 'readonly')
+      const currentCompleted = transactionComplete(currentTransaction)
+      const currentUser = await requestResult(
+        currentTransaction.objectStore(USERS_STORE).get(ADMIN_EMAIL),
+      )
+      await currentCompleted
+      if (currentUser?.role !== 'admin') {
+        throw new Error('No se pudo inicializar la cuenta administradora.', { cause: error })
+      }
+    }
+  } finally {
+    database.close()
+  }
+}
+
 export async function authenticateLocalUser(email, password) {
   const database = await openDatabase()
 
@@ -755,6 +1356,43 @@ export async function authenticateLocalUser(email, password) {
   }
 }
 
+export async function changeInitialAdminPassword(email, password) {
+  const normalizedEmail = email.trim().toLowerCase()
+  if (normalizedEmail !== ADMIN_EMAIL || password.length < 12) {
+    throw new Error('La contraseña nueva debe tener al menos 12 caracteres.')
+  }
+  if (password === ADMIN_INITIAL_PASSWORD) {
+    throw new Error('Elige una contraseña distinta a la contraseña inicial.')
+  }
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error('Este navegador no ofrece la protección criptográfica requerida.')
+  }
+
+  const salt = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  const passwordHash = await derivePasswordHash(password, salt)
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(USERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    const store = transaction.objectStore(USERS_STORE)
+    const user = await requestResult(store.get(normalizedEmail))
+    if (!user || user.role !== 'admin' || user.requiresPasswordChange !== true) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('La cuenta no requiere el cambio inicial de contraseña.')
+    }
+    user.passwordSalt = encodeBytes(salt)
+    user.passwordHash = encodeBytes(passwordHash)
+    user.requiresPasswordChange = false
+    user.updatedAt = new Date().toISOString()
+    await requestResult(store.put(user))
+    await completed
+    return toProfile(user)
+  } finally {
+    database.close()
+  }
+}
+
 export async function getLocalUserProfile(email) {
   const database = await openDatabase()
 
@@ -766,6 +1404,33 @@ export async function getLocalUserProfile(email) {
     )
     await completed
     return user ? toProfile(user) : null
+  } finally {
+    database.close()
+  }
+}
+
+export async function updateLocalUserProfile(email, details) {
+  const normalizedEmail = email.trim().toLowerCase()
+  const name = details.name.trim()
+  if (name.length < 2 || name.length > 100) {
+    throw new Error('El nombre debe tener entre 2 y 100 caracteres.')
+  }
+
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(USERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    const store = transaction.objectStore(USERS_STORE)
+    const user = await requestResult(store.get(normalizedEmail))
+    if (!user) {
+      await completed
+      throw new Error('No se encontró la cuenta para actualizar.')
+    }
+
+    user.name = name
+    await requestResult(store.put(user))
+    await completed
+    return toProfile(user)
   } finally {
     database.close()
   }

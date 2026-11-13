@@ -31,7 +31,7 @@ export default function CustomerOrdersPage({ user }) {
             ? (
               <div className="table-scroll">
                 <table className="data-table customer-orders-table">
-                  <thead><tr><th>Pedido</th><th>Ferretería</th><th>Producto</th><th>Cantidad</th><th>Total</th><th>Fecha</th><th>Estado</th></tr></thead>
+                  <thead><tr><th>Pedido</th><th>Ferretería</th><th>Producto</th><th>Cantidad</th><th>Total</th><th>Camionero y entrega</th><th>Fecha</th><th>Estado</th></tr></thead>
                   <tbody>
                     {orders.map((order) => (
                       <tr key={order.id}>
@@ -40,6 +40,7 @@ export default function CustomerOrdersPage({ user }) {
                         <td><strong>{order.productName}</strong>{order.deliveryAddress && <small>{order.deliveryAddress}</small>}</td>
                         <td>{order.quantity}</td>
                         <td className="table-emphasis">{formatCurrency(order.total)}</td>
+                        <td>{order.transporterName || 'Sin asignar'}{order.transporterEmail && <small>{order.deliveryStatus || 'Pendiente de aceptación'}</small>}</td>
                         <td>{formatDate(order.createdAt)}</td>
                         <td><span className={`customer-order-status order-status-${order.status.toLowerCase().replaceAll(' ', '-')}`}>{order.status}</span></td>
                       </tr>
