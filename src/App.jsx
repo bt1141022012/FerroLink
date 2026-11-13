@@ -1,9 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   authenticateLocalUser,
+  createOrder,
+  deleteProduct,
+  getOrders,
+  getProducts,
   getLocalUserProfile,
+  getShopProfile,
   registerLocalUser,
+  saveProduct,
+  saveShopProfile,
+  updateOrderStatus,
 } from './services/localAuth'
+import ProductsPage from './components/ProductsPage'
+import OrdersPage, { OrdersTable } from './components/OrdersPage'
+import CustomerCatalogPage from './components/CustomerCatalogPage'
+import CustomerOrdersPage from './components/CustomerOrdersPage'
+import MerchantBackupPage from './components/MerchantBackupPage'
+import { formatCurrency } from './utils/formatters'
 import './App.css'
 
 function BrandMark() {
@@ -245,6 +259,7 @@ function LoginPage({ onBack, onAuthenticated, initialNotice = '' }) {
           name: formData.get('name'),
           email,
           password,
+          role: formData.get('role'),
         })
         onAuthenticated(profile, formData.has('remember'))
         return
@@ -314,6 +329,13 @@ function LoginPage({ onBack, onAuthenticated, initialNotice = '' }) {
                   maxLength={100}
                   required
                 />
+                <label htmlFor="role">¿Qué tipo de usuario eres?</label>
+                <select id="role" name="role" defaultValue="" required>
+                  <option value="" disabled>Selecciona tu perfil</option>
+                  <option value="customer">Cliente o constructor</option>
+                  <option value="merchant">Ferretería aliada</option>
+                  <option value="transporter">Transportista</option>
+                </select>
               </>
             )}
             <label htmlFor="email">Correo electrónico</label>
@@ -398,21 +420,382 @@ function LoginPage({ onBack, onAuthenticated, initialNotice = '' }) {
   )
 }
 
-function AccountPage({ user, onLogout, notice }) {
+const DASHBOARD_TABS = [
+  { id: 'overview', label: 'Resumen', icon: '▦' },
+  { id: 'products', label: 'Productos', icon: '▤' },
+  { id: 'orders', label: 'Pedidos', icon: '⇄' },
+  { id: 'shop', label: 'Mi ferretería', icon: '⌂' },
+  { id: 'backup', label: 'Respaldos', icon: '⇩' },
+]
+
+const ROLE_LABELS = {
+  merchant: 'Ferretería aliada',
+  customer: 'Cliente o constructor',
+  transporter: 'Transportista',
+}
+
+const ROLE_TABS = {
+  merchant: DASHBOARD_TABS,
+  customer: [
+    { id: 'overview', label: 'Inicio', icon: '▦' },
+    { id: 'catalog', label: 'Buscar productos', icon: '⌕' },
+    { id: 'my-orders', label: 'Mis pedidos', icon: '⇄' },
+    { id: 'profile', label: 'Mi perfil', icon: '◉' },
+  ],
+  transporter: [
+    { id: 'overview', label: 'Inicio', icon: '▦' },
+    { id: 'deliveries', label: 'Entregas disponibles', icon: '↗' },
+    { id: 'delivery-history', label: 'Mi historial', icon: '◷' },
+    { id: 'profile', label: 'Mi perfil', icon: '◉' },
+  ],
+}
+
+async function fetchMerchantData(ownerEmail) {
+  const [shop, products, orders] = await Promise.all([
+    getShopProfile(ownerEmail),
+    getProducts(ownerEmail),
+    getOrders(ownerEmail),
+  ])
+  return { shop, products, orders }
+}
+
+function MerchantDashboard({ user, onLogout, notice }) {
+  const [activeTab, setActiveTab] = useState('overview')
+  const [shop, setShop] = useState({ name: '', phone: '', address: '' })
+  const [products, setProducts] = useState([])
+  const [orders, setOrders] = useState([])
+  const [feedback, setFeedback] = useState(notice)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+
+  const loadDashboard = useCallback(async () => {
+    try {
+      const data = await fetchMerchantData(user.email)
+      setShop(data.shop)
+      setProducts(data.products)
+      setOrders(data.orders)
+      return true
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'No se pudo cargar el panel.')
+      return false
+    } finally {
+      setIsLoading(false)
+    }
+  }, [user.email])
+
+  useEffect(() => {
+    let active = true
+    fetchMerchantData(user.email)
+      .then((data) => {
+        if (!active) return
+        setShop(data.shop)
+        setProducts(data.products)
+        setOrders(data.orders)
+      })
+      .catch((error) => {
+        if (active) setFeedback(error instanceof Error ? error.message : 'No se pudo cargar el panel.')
+      })
+      .finally(() => {
+        if (active) setIsLoading(false)
+      })
+
+    return () => { active = false }
+  }, [user.email])
+
+  async function performAction(action, successMessage) {
+    setFeedback('')
+    setIsSaving(true)
+    try {
+      await action()
+      if (!await loadDashboard()) return false
+      setFeedback(successMessage)
+      return true
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'No se pudo completar la operación.')
+      return false
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  function handleProductSave(details) {
+    return performAction(
+      () => saveProduct(user.email, details),
+      details.id ? 'Producto actualizado.' : 'Producto agregado al catálogo.',
+    )
+  }
+
+  async function handleProductDelete(product) {
+    if (!window.confirm(`¿Eliminar "${product.name}" del catálogo?`)) return
+    await performAction(() => deleteProduct(user.email, product.id), 'Producto eliminado.')
+  }
+
+  async function handleProductToggle(product) {
+    await performAction(
+      () => saveProduct(user.email, { ...product, available: !product.available }),
+      product.available ? 'Producto pausado.' : 'Producto disponible en el catálogo.',
+    )
+  }
+
+  function handleOrderCreate(details) {
+    return performAction(
+      () => createOrder(user.email, details),
+      'Pedido registrado y existencias actualizadas.',
+    )
+  }
+
+  async function handleOrderStatus(order, status) {
+    await performAction(
+      () => updateOrderStatus(user.email, order.id, status),
+      status === 'Cancelado' ? 'Pedido cancelado; las existencias fueron devueltas.' : 'Estado del pedido actualizado.',
+    )
+  }
+
+  async function handleShopSave(event) {
+    event.preventDefault()
+    const formData = new FormData(event.currentTarget)
+    await performAction(
+      async () => { setShop(await saveShopProfile(user.email, {
+        name: formData.get('shopName'),
+        phone: formData.get('phone'),
+        address: formData.get('address'),
+      })) },
+      'Datos de la ferretería guardados.',
+    )
+  }
+
+  const activeProducts = products.filter((product) => product.available)
+  const pendingOrders = orders.filter((order) => !['Entregado', 'Cancelado'].includes(order.status))
+  const inventoryValue = products.reduce((sum, product) => sum + product.price * product.stock, 0)
+  const completedSales = orders.filter((order) => order.status === 'Entregado')
+    .reduce((sum, order) => sum + order.total, 0)
+  const recentOrders = [...orders].slice(0, 5)
+
+  function renderOverview() {
+    return (
+      <>
+        <div className="dashboard-welcome">
+          <div><p className="eyebrow">PANEL DE FERRETERÍA</p><h1>Hola, {shop.name || user.name}</h1><p>Administra tu catálogo y mantén tus pedidos al día.</p></div>
+          <button className="button" type="button" onClick={() => setActiveTab('products')}>Agregar producto <span className="plus-sign">+</span></button>
+        </div>
+        {!shop.name && (
+          <button className="setup-callout" type="button" onClick={() => setActiveTab('shop')}>
+            <span className="setup-callout-icon">⌂</span><span><strong>Completa el perfil de tu ferretería</strong><small>Agrega el nombre y datos de contacto de tu negocio.</small></span><ArrowIcon />
+          </button>
+        )}
+        <div className="metric-grid">
+          <article className="metric-card"><span className="metric-icon metric-blue">▤</span><span className="metric-label">Productos activos</span><strong>{activeProducts.length}</strong><small>{products.length} en el catálogo</small></article>
+          <article className="metric-card"><span className="metric-icon metric-orange">◷</span><span className="metric-label">Pedidos pendientes</span><strong>{pendingOrders.length}</strong><small>Por preparar o entregar</small></article>
+          <article className="metric-card"><span className="metric-icon metric-green">$</span><span className="metric-label">Valor en inventario</span><strong>{formatCurrency(inventoryValue)}</strong><small>Existencias × precio actual</small></article>
+          <article className="metric-card"><span className="metric-icon metric-slate">↗</span><span className="metric-label">Ventas entregadas</span><strong>{formatCurrency(completedSales)}</strong><small>{orders.filter((order) => order.status === 'Entregado').length} pedidos completados</small></article>
+        </div>
+        <section className="dashboard-panel">
+          <div className="panel-heading"><div><h2>Pedidos recientes</h2><p>Revisa su estado y continúa con la siguiente etapa.</p></div><button className="plain-link" type="button" onClick={() => setActiveTab('orders')}>Ver todos <ArrowIcon /></button></div>
+          {recentOrders.length
+            ? <OrdersTable orders={recentOrders} onStatusChange={handleOrderStatus} />
+            : <div className="compact-empty">Los pedidos que registres aparecerán aquí.</div>}
+        </section>
+      </>
+    )
+  }
+
+  function renderShop() {
+    return (
+      <>
+        <div className="dashboard-welcome"><div><p className="eyebrow">NEGOCIO</p><h1>Mi ferretería</h1><p>Los datos de contacto que verán tus clientes.</p></div></div>
+        <section className="dashboard-panel shop-settings-panel">
+          <div className="panel-heading"><div><h2>Información del negocio</h2><p>Mantén los datos de tu ferretería actualizados.</p></div></div>
+          <form className="dashboard-form settings-form" onSubmit={handleShopSave}>
+            <label>Nombre de la ferretería<input name="shopName" defaultValue={shop.name} key={shop.name} maxLength={120} placeholder="Ej. Ferretería Central" required /></label>
+            <div className="form-grid">
+              <label>Teléfono de contacto<input name="phone" defaultValue={shop.phone} key={shop.phone} maxLength={40} type="tel" placeholder="0000-0000" /></label>
+              <label>Dirección<input name="address" defaultValue={shop.address} key={shop.address} maxLength={180} placeholder="Dirección del negocio" /></label>
+            </div>
+            <div><button className="button" type="submit" disabled={isSaving}>{isSaving ? 'Guardando...' : 'Guardar cambios'}</button></div>
+          </form>
+        </section>
+      </>
+    )
+  }
+
+  function renderBackup() {
+    return <MerchantBackupPage user={user} onRestored={loadDashboard} />
+  }
+
   return (
-    <main className="account-page">
-      <header className="account-header">
-        <a className="brand-link" href="#inicio"><Brand /></a>
-        <button className="text-button" type="button" onClick={onLogout}>Cerrar sesión</button>
-      </header>
-      <section className="account-card">
-        <span className="login-mark"><BrandMark /></span>
-        <p className="eyebrow">FERROLINK</p>
-        <h1>¡Hola, {user.name}!</h1>
-        <p>Tu sesión está activa. Ya puedes continuar con FerroLink.</p>
-        <div className="account-email">{user.email}</div>
-        {notice && <p className="form-notice" role="status">{notice}</p>}
-        <button className="button" type="button" onClick={onLogout}>Cerrar sesión <ArrowIcon /></button>
+    <main className="merchant-app">
+      <aside className="dashboard-sidebar">
+        <a className="brand-link dashboard-brand" href="#panel"><Brand /></a>
+        <div className="sidebar-caption">GESTIÓN</div>
+        <nav className="dashboard-nav" aria-label="Panel de ferretería">
+          {ROLE_TABS.merchant.map((tab) => (
+            <button className={activeTab === tab.id ? 'dashboard-nav-item selected' : 'dashboard-nav-item'} type="button" key={tab.id} onClick={() => setActiveTab(tab.id)}>
+              <span className="nav-icon" aria-hidden="true">{tab.icon}</span>{tab.label}
+              {tab.id === 'orders' && pendingOrders.length > 0 && <span className="nav-counter">{pendingOrders.length}</span>}
+            </button>
+          ))}
+          <button className="dashboard-nav-item dashboard-nav-logout" type="button" onClick={onLogout}>
+            <span className="nav-icon" aria-hidden="true">↗</span>Cerrar sesión
+          </button>
+        </nav>
+        <div className="sidebar-bottom">
+          <span className="sidebar-avatar">{(shop.name || user.name).slice(0, 1).toUpperCase()}</span>
+          <span className="sidebar-user"><strong>{shop.name || user.name}</strong><small>{user.email}</small></span>
+          <button className="sidebar-logout" type="button" onClick={onLogout} aria-label="Cerrar sesión" title="Cerrar sesión">↗</button>
+        </div>
+      </aside>
+      <section className="dashboard-main" id="panel">
+        <header className="dashboard-topbar"><div className="dashboard-breadcrumb">FerroLink <span>/</span> {DASHBOARD_TABS.find((tab) => tab.id === activeTab)?.label}</div><div className="topbar-profile"><span className="online-indicator" /> Sesión activa</div></header>
+        <div className="dashboard-content">
+          {feedback && <div className={`dashboard-feedback${feedback === notice ? ' feedback-info' : ''}`} role="status"><span>{feedback === notice ? 'i' : '✓'}</span>{feedback}<button type="button" onClick={() => setFeedback('')} aria-label="Cerrar aviso">×</button></div>}
+          {activeTab === 'overview' && renderOverview()}
+          {activeTab === 'products' && <ProductsPage
+            products={products}
+            onSaveProduct={handleProductSave}
+            onDeleteProduct={handleProductDelete}
+            onToggleAvailability={handleProductToggle}
+            isLoading={isLoading}
+            isSaving={isSaving}
+          />}
+          {activeTab === 'orders' && <OrdersPage
+            orders={orders}
+            products={products}
+            onCreateOrder={handleOrderCreate}
+            onStatusChange={handleOrderStatus}
+            isLoading={isLoading}
+            isSaving={isSaving}
+          />}
+          {activeTab === 'shop' && renderShop()}
+          {activeTab === 'backup' && renderBackup()}
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function RoleDashboard({ user, onLogout, notice }) {
+  const [activeTab, setActiveTab] = useState('overview')
+  const tabs = ROLE_TABS[user.role]
+  const selectedTab = tabs.find((tab) => tab.id === activeTab) ?? tabs[0]
+  const roleContent = {
+    customer: {
+      eyebrow: 'TU ESPACIO DE CONSTRUCCIÓN',
+      title: 'Encuentra lo que necesitas para tu proyecto.',
+      description: 'Consulta la oferta de ferreterías y mantén tus compras organizadas.',
+      cards: [
+        ['catalog', '⌕', 'Busca materiales', 'Explora productos disponibles en las ferreterías aliadas.'],
+        ['my-orders', '⇄', 'Sigue tus pedidos', 'Consulta el avance de tus compras y entregas.'],
+        ['profile', '⌂', 'Organiza tus proyectos', 'Mantén tus datos a mano para futuras compras.'],
+      ],
+      sections: {
+        catalog: ['Catálogo de ferreterías', 'Aquí podrás buscar materiales, comparar opciones y consultar disponibilidad.'],
+        'my-orders': ['Mis pedidos', 'Aquí podrás consultar tus pedidos y el avance de cada entrega.'],
+      },
+    },
+    transporter: {
+      eyebrow: 'TU ESPACIO DE TRANSPORTE',
+      title: 'Conecta con nuevas oportunidades de entrega.',
+      description: 'Organiza tus entregas y mantén a la mano la información de cada recorrido.',
+      cards: [
+        ['deliveries', '↗', 'Encuentra entregas', 'Consulta solicitudes de transporte de ferreterías aliadas.'],
+        ['delivery-history', '◷', 'Actualiza recorridos', 'Mantén al día las etapas de preparación y entrega.'],
+        ['profile', '⌂', 'Gestiona tu perfil', 'Ten visibles tus datos de contacto para coordinar.'],
+      ],
+      sections: {
+        deliveries: ['Entregas disponibles', 'Aquí aparecerán las solicitudes de transporte de las ferreterías.'],
+        'delivery-history': ['Historial de entregas', 'Aquí podrás consultar las entregas completadas y su estado.'],
+      },
+    },
+  }[user.role]
+
+  function renderRoleContent() {
+    if (user.role === 'customer' && activeTab === 'catalog') {
+      return <CustomerCatalogPage user={user} />
+    }
+
+    if (user.role === 'customer' && activeTab === 'my-orders') {
+      return <CustomerOrdersPage user={user} />
+    }
+
+    if (activeTab === 'profile') {
+      return (
+        <section className="dashboard-panel role-profile-panel">
+          <div className="panel-heading"><div><h2>Datos de la cuenta</h2><p>Información asociada a tu perfil.</p></div></div>
+          <div className="role-profile-details">
+            <div><span>Nombre</span><strong>{user.name}</strong></div>
+            <div><span>Correo electrónico</span><strong>{user.email}</strong></div>
+            <div><span>Tipo de usuario</span><strong>{ROLE_LABELS[user.role]}</strong></div>
+          </div>
+        </section>
+      )
+    }
+
+    if (activeTab !== 'overview') {
+      const [title, description] = roleContent.sections[activeTab]
+      return (
+        <section className="dashboard-panel role-module-panel">
+          <div className="role-module-icon">{selectedTab.icon}</div>
+          <p className="eyebrow">{ROLE_LABELS[user.role]}</p>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </section>
+      )
+    }
+
+    return (
+      <>
+        <div className="dashboard-welcome role-welcome">
+          <div><p className="eyebrow">{roleContent.eyebrow}</p><h1>{user.name}</h1><p>{roleContent.description}</p></div>
+        </div>
+        <section className="role-hero-card">
+          <div className="role-hero-icon">{user.role === 'customer' ? '⌕' : '↗'}</div>
+          <p className="eyebrow">FERROLINK</p>
+          <h2>{roleContent.title}</h2>
+          <p>{roleContent.description}</p>
+        </section>
+        <div className="role-feature-grid">
+          {roleContent.cards.map(([tabId, icon, title, description]) => (
+            <button
+              className="role-feature-card"
+              type="button"
+              key={title}
+              onClick={() => setActiveTab(tabId)}
+            >
+              <span>{icon}</span><strong>{title}</strong><small>{description}</small>
+            </button>
+          ))}
+        </div>
+      </>
+    )
+  }
+
+  return (
+    <main className="merchant-app role-app">
+      <aside className="dashboard-sidebar">
+        <a className="brand-link dashboard-brand" href="#panel"><Brand /></a>
+        <div className="sidebar-caption">MI FERROLINK</div>
+        <nav className="dashboard-nav" aria-label={`Menú para ${ROLE_LABELS[user.role]}`}>
+          {tabs.map((tab) => (
+            <button className={activeTab === tab.id ? 'dashboard-nav-item selected' : 'dashboard-nav-item'} type="button" key={tab.id} onClick={() => setActiveTab(tab.id)}>
+              <span className="nav-icon" aria-hidden="true">{tab.icon}</span>{tab.label}
+            </button>
+          ))}
+          <button className="dashboard-nav-item dashboard-nav-logout" type="button" onClick={onLogout}>
+            <span className="nav-icon" aria-hidden="true">↗</span>Cerrar sesión
+          </button>
+        </nav>
+        <div className="sidebar-bottom">
+          <span className="sidebar-avatar">{user.name.slice(0, 1).toUpperCase()}</span>
+          <span className="sidebar-user"><strong>{user.name}</strong><small>{ROLE_LABELS[user.role]}</small></span>
+          <button className="sidebar-logout" type="button" onClick={onLogout} aria-label="Cerrar sesión" title="Cerrar sesión">↗</button>
+        </div>
+      </aside>
+      <section className="dashboard-main" id="panel">
+        <header className="dashboard-topbar"><div className="dashboard-breadcrumb">FerroLink <span>/</span> {selectedTab.label}</div><div className="topbar-profile"><span className="online-indicator" /> Sesión activa</div></header>
+        <div className="dashboard-content">
+          {notice && <div className="dashboard-feedback feedback-info" role="status"><span>i</span>{notice}</div>}
+          {renderRoleContent()}
+        </div>
       </section>
     </main>
   )
@@ -475,7 +858,13 @@ function App() {
     }
   }
 
-  if (user) return <AccountPage user={user} onLogout={handleLogout} notice={sessionNotice} />
+  if (user) {
+    const role = ['merchant', 'customer', 'transporter'].includes(user.role) ? user.role : 'merchant'
+    const account = { ...user, role }
+    return role === 'merchant'
+      ? <MerchantDashboard user={account} onLogout={handleLogout} notice={sessionNotice} />
+      : <RoleDashboard user={account} onLogout={handleLogout} notice={sessionNotice} />
+  }
 
   return page === 'login'
     ? <LoginPage
