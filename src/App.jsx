@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
+  createCustomerCartOrders,
   authenticateLocalUser,
   createOrder,
   deleteProduct,
@@ -19,9 +20,38 @@ import CustomerCatalogPage from './components/CustomerCatalogPage'
 import CustomerOrdersPage from './components/CustomerOrdersPage'
 import MerchantBackupPage from './components/MerchantBackupPage'
 import LandingOffersSection from './components/LandingOffersSection'
+import OffersCart from './components/OffersCart'
 import UserProfilePage from './components/UserProfilePage'
 import { formatCurrency } from './utils/formatters'
 import './App.css'
+
+function readSavedOffersCart() {
+  try {
+    const savedCart = localStorage.getItem('ferrolink-offers-cart')
+    if (!savedCart) return { items: [], notice: '' }
+
+    const parsedCart = JSON.parse(savedCart)
+    const validCart = Array.isArray(parsedCart) && parsedCart.every((item) => item
+      && item.product
+      && typeof item.product.id === 'string'
+      && typeof item.product.name === 'string'
+      && typeof item.product.shopName === 'string'
+      && Number.isFinite(item.product.offerPrice)
+      && item.product.offerPrice >= 0
+      && Number.isInteger(item.product.stock)
+      && item.product.stock > 0
+      && Number.isInteger(item.quantity)
+      && item.quantity > 0
+      && item.quantity <= item.product.stock)
+    if (!validCart) throw new Error('El carrito guardado no tiene un formato válido.')
+    return { items: parsedCart, notice: '' }
+  } catch (error) {
+    return {
+      items: [],
+      notice: error instanceof Error ? error.message : 'No se pudo cargar el carrito guardado.',
+    }
+  }
+}
 
 function BrandMark() {
   return (
@@ -61,7 +91,19 @@ function Brand({ light = false }) {
   )
 }
 
-function LandingPage({ onLogin }) {
+function LandingPage({
+  onLogin,
+  cart,
+  cartNotice,
+  cartOpen,
+  onOpenCart,
+  onCloseCart,
+  onAddToCart,
+  onChangeCartQuantity,
+  onRemoveFromCart,
+}) {
+  const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0)
+
   return (
     <>
       <header className="site-header">
@@ -76,6 +118,9 @@ function LandingPage({ onLogin }) {
           <a href="#contacto">Contacto</a>
         </nav>
         <div className="header-actions">
+          <button className="landing-cart-button" type="button" onClick={onOpenCart} aria-label={`Abrir carrito, ${cartCount} ${cartCount === 1 ? 'producto' : 'productos'}`}>
+            <span aria-hidden="true">▤</span> Carrito <span className="landing-cart-count">{cartCount}</span>
+          </button>
           <button className="text-button" type="button" onClick={onLogin}>Iniciar sesión</button>
           <button className="button button-small" type="button" onClick={onLogin}>
             Acceder <ArrowIcon />
@@ -161,7 +206,7 @@ function LandingPage({ onLogin }) {
           </div>
         </section>
 
-        <LandingOffersSection onLogin={onLogin} />
+        <LandingOffersSection onAddToCart={onAddToCart} cart={cart} cartNotice={cartNotice} />
 
         <section className="audience-section" id="para-quien">
           <div className="section-intro">
@@ -235,6 +280,16 @@ function LandingPage({ onLogin }) {
         <span>Conectando cada parte de tu operación.</span>
         <span>© {new Date().getFullYear()} FerroLink</span>
       </footer>
+      {cartOpen && <OffersCart
+        cart={cart}
+        user={null}
+        cartNotice={cartNotice}
+        onChangeQuantity={onChangeCartQuantity}
+        onRemove={onRemoveFromCart}
+        onLogin={onLogin}
+        onClose={onCloseCart}
+        isDialog
+      />}
     </>
   )
 }
@@ -445,7 +500,9 @@ const ROLE_TABS = {
   merchant: DASHBOARD_TABS,
   customer: [
     { id: 'overview', label: 'Inicio', icon: '▦' },
+    { id: 'offers', label: 'Ofertas', icon: '%' },
     { id: 'catalog', label: 'Buscar productos', icon: '⌕' },
+    { id: 'cart', label: 'Mi carrito', icon: '▤' },
     { id: 'my-orders', label: 'Mis pedidos', icon: '⇄' },
     { id: 'profile', label: 'Mi perfil', icon: '◉' },
   ],
@@ -681,8 +738,22 @@ function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
   )
 }
 
-function RoleDashboard({ user, onLogout, notice, onProfileUpdate }) {
-  const [activeTab, setActiveTab] = useState('overview')
+function RoleDashboard({
+  user,
+  onLogout,
+  notice,
+  onProfileUpdate,
+  cart,
+  cartNotice,
+  onChangeCartQuantity,
+  onRemoveFromCart,
+  onAddToCart,
+  onCartCheckout,
+}) {
+  const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0)
+  const [activeTab, setActiveTab] = useState(
+    () => user.role === 'customer' && cart.length ? 'cart' : 'overview',
+  )
   const tabs = ROLE_TABS[user.role]
   const selectedTab = tabs.find((tab) => tab.id === activeTab) ?? tabs[0]
   const roleContent = {
@@ -691,7 +762,9 @@ function RoleDashboard({ user, onLogout, notice, onProfileUpdate }) {
       title: 'Encuentra lo que necesitas para tu proyecto.',
       description: 'Consulta la oferta de ferreterías y mantén tus compras organizadas.',
       cards: [
+        ['offers', '%', 'Explora ofertas', 'Descubre promociones vigentes sin salir de tu cuenta.'],
         ['catalog', '⌕', 'Busca materiales', 'Explora productos disponibles en las ferreterías aliadas.'],
+        ['cart', '▤', 'Revisa tu carrito', 'Confirma las ofertas que agregaste y realiza tu pedido.'],
         ['my-orders', '⇄', 'Sigue tus pedidos', 'Consulta el avance de tus compras y entregas.'],
         ['profile', '⌂', 'Organiza tus proyectos', 'Mantén tus datos a mano para futuras compras.'],
       ],
@@ -717,12 +790,28 @@ function RoleDashboard({ user, onLogout, notice, onProfileUpdate }) {
   }[user.role]
 
   function renderRoleContent() {
+    if (user.role === 'customer' && activeTab === 'offers') {
+      return <LandingOffersSection onAddToCart={onAddToCart} cart={cart} cartNotice={cartNotice} />
+    }
+
     if (user.role === 'customer' && activeTab === 'catalog') {
       return <CustomerCatalogPage user={user} />
     }
 
     if (user.role === 'customer' && activeTab === 'my-orders') {
       return <CustomerOrdersPage user={user} />
+    }
+
+    if (user.role === 'customer' && activeTab === 'cart') {
+      return <OffersCart
+        cart={cart}
+        user={user}
+        cartNotice={cartNotice}
+        onChangeQuantity={onChangeCartQuantity}
+        onRemove={onRemoveFromCart}
+        onCheckout={onCartCheckout}
+        onContinue={() => setActiveTab('offers')}
+      />
     }
 
     if (activeTab === 'profile') {
@@ -777,6 +866,7 @@ function RoleDashboard({ user, onLogout, notice, onProfileUpdate }) {
           {tabs.map((tab) => (
             <button className={activeTab === tab.id ? 'dashboard-nav-item selected' : 'dashboard-nav-item'} type="button" key={tab.id} onClick={() => setActiveTab(tab.id)}>
               <span className="nav-icon" aria-hidden="true">{tab.icon}</span>{tab.label}
+              {tab.id === 'cart' && cartCount > 0 && <span className="nav-counter">{cartCount}</span>}
             </button>
           ))}
           <button className="dashboard-nav-item dashboard-nav-logout" type="button" onClick={onLogout}>
@@ -804,6 +894,10 @@ function App() {
   const [page, setPage] = useState('landing')
   const [user, setUser] = useState(null)
   const [sessionNotice, setSessionNotice] = useState('')
+  const [initialCart] = useState(readSavedOffersCart)
+  const [cart, setCart] = useState(initialCart.items)
+  const [cartNotice, setCartNotice] = useState(initialCart.notice)
+  const [cartOpen, setCartOpen] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -852,6 +946,82 @@ function App() {
     return updatedProfile
   }
 
+  function saveCart(nextCart, notice = '') {
+    try {
+      localStorage.setItem('ferrolink-offers-cart', JSON.stringify(nextCart))
+      setCart(nextCart)
+      setCartNotice(notice)
+      return true
+    } catch {
+      setCart(nextCart)
+      setCartNotice('No se pudo guardar el carrito en este navegador; se conservará solo hasta cerrar esta pestaña.')
+      return false
+    }
+  }
+
+  function handleAddToCart(product) {
+    const currentItem = cart.find((item) => item.product.id === product.id)
+    if (!Number.isInteger(product.stock) || product.stock < 1) {
+      setCartNotice('Esta oferta ya no tiene existencias disponibles.')
+      return false
+    }
+    if (!currentItem && cart.length >= 100) {
+      setCartNotice('El carrito admite hasta 100 productos distintos por pedido.')
+      return false
+    }
+    const quantity = Math.min((currentItem?.quantity ?? 0) + 1, product.stock)
+    const cartProduct = {
+      id: product.id,
+      name: product.name,
+      shopName: product.shopName,
+      offerPrice: product.offerPrice,
+      offerDescription: product.offerDescription,
+      offerStartDate: product.offerStartDate,
+      offerEndDate: product.offerEndDate,
+      stock: product.stock,
+      category: product.category,
+    }
+    const nextCart = currentItem
+      ? cart.map((item) => item.product.id === product.id
+        ? { product: cartProduct, quantity }
+        : item)
+      : [...cart, { product: cartProduct, quantity: 1 }]
+    return saveCart(nextCart, currentItem?.quantity >= product.stock
+      ? 'Ya agregaste todas las existencias disponibles de esta oferta.'
+      : `${product.name} se agregó al carrito.`)
+  }
+
+  function handleCartQuantityChange(productId, quantity) {
+    const item = cart.find((entry) => entry.product.id === productId)
+    if (!item || !Number.isInteger(quantity) || quantity < 1 || quantity > item.product.stock) return
+    saveCart(cart.map((entry) => entry.product.id === productId ? { ...entry, quantity } : entry))
+  }
+
+  function handleCartRemove(productId) {
+    saveCart(cart.filter((item) => item.product.id !== productId), 'Producto eliminado del carrito.')
+  }
+
+  async function handleCartCheckout(details) {
+    const orders = await createCustomerCartOrders(
+      user.email,
+      details,
+      cart.map((item) => ({
+        productId: item.product.id,
+        quantity: item.quantity,
+        expectedOfferPrice: item.product.offerPrice,
+      })),
+    )
+    let warning = ''
+    try {
+      localStorage.removeItem('ferrolink-offers-cart')
+    } catch {
+      warning = 'No se pudo borrar el carrito guardado en el navegador; revisa que no vuelva a aparecer al recargar.'
+    }
+    setCart([])
+    setCartNotice(warning)
+    return { orders, warning }
+  }
+
   function handleLogout() {
     try {
       localStorage.removeItem('ferrolink-session')
@@ -868,7 +1038,18 @@ function App() {
     const account = { ...user, role }
     return role === 'merchant'
       ? <MerchantDashboard user={account} onLogout={handleLogout} notice={sessionNotice} onProfileUpdate={handleProfileUpdate} />
-      : <RoleDashboard user={account} onLogout={handleLogout} notice={sessionNotice} onProfileUpdate={handleProfileUpdate} />
+      : <RoleDashboard
+        user={account}
+        onLogout={handleLogout}
+        notice={sessionNotice}
+        onProfileUpdate={handleProfileUpdate}
+        cart={cart}
+        cartNotice={cartNotice}
+        onChangeCartQuantity={handleCartQuantityChange}
+        onRemoveFromCart={handleCartRemove}
+        onAddToCart={handleAddToCart}
+        onCartCheckout={handleCartCheckout}
+      />
   }
 
   return page === 'login'
@@ -877,7 +1058,17 @@ function App() {
       onAuthenticated={handleAuthenticated}
       initialNotice={sessionNotice}
     />
-    : <LandingPage onLogin={() => setPage('login')} />
+    : <LandingPage
+      onLogin={() => { setCartOpen(false); setPage('login') }}
+      cart={cart}
+      cartNotice={cartNotice}
+      cartOpen={cartOpen}
+      onOpenCart={() => setCartOpen(true)}
+      onCloseCart={() => setCartOpen(false)}
+      onAddToCart={handleAddToCart}
+      onChangeCartQuantity={handleCartQuantityChange}
+      onRemoveFromCart={handleCartRemove}
+    />
 }
 
 export default App

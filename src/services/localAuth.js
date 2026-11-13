@@ -623,6 +623,127 @@ export async function createCustomerOrder(customerEmail, details) {
   }
 }
 
+export async function createCustomerCartOrders(customerEmail, details, items) {
+  const normalizedEmail = customerEmail.trim().toLowerCase()
+  const customerName = normalizeText(details.customerName, 'El nombre del cliente', 120)
+  const deliveryAddress = normalizeText(details.deliveryAddress, 'La dirección de entrega', 180)
+  if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
+    throw new Error('El carrito no contiene productos válidos para realizar el pedido.')
+  }
+
+  const itemIds = new Set()
+  const requestedItems = items.map((item) => {
+    if (typeof item.productId !== 'string' || itemIds.has(item.productId)) {
+      throw new Error('El carrito contiene productos repetidos o inválidos.')
+    }
+    itemIds.add(item.productId)
+    const quantity = validateStock(item.quantity)
+    if (quantity < 1) throw new Error('La cantidad debe ser al menos uno.')
+    if (!Number.isFinite(item.expectedOfferPrice) || item.expectedOfferPrice < 0) {
+      throw new Error('El carrito contiene un precio de oferta inválido.')
+    }
+    return { productId: item.productId, quantity, expectedOfferPrice: item.expectedOfferPrice }
+  })
+
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(
+      [PRODUCTS_STORE, SHOPS_STORE, ORDERS_STORE],
+      'readwrite',
+    )
+    const productsStore = transaction.objectStore(PRODUCTS_STORE)
+    const shopsStore = transaction.objectStore(SHOPS_STORE)
+    const ordersStore = transaction.objectStore(ORDERS_STORE)
+    const completed = transactionComplete(transaction)
+    const today = getLocalDateOnly()
+    const lines = []
+    let remainingItems = requestedItems.length
+    let failureMessage = ''
+    let createdOrders = []
+
+    for (const requestedItem of requestedItems) {
+      const productRequest = productsStore.get(requestedItem.productId)
+      productRequest.onsuccess = () => {
+        if (failureMessage) return
+        const product = productRequest.result
+        if (!product || !product.available || product.stock < requestedItem.quantity) {
+          failureMessage = 'Un producto del carrito ya no está disponible o no tiene existencias suficientes.'
+          transaction.abort()
+          return
+        }
+
+        if (product.isOffer !== true
+          || !isValidDateOnly(product.offerStartDate)
+          || !isValidDateOnly(product.offerEndDate)
+          || product.offerStartDate > today
+          || product.offerEndDate < today
+          || !Number.isFinite(product.offerPrice)
+          || product.offerPrice < 0) {
+          failureMessage = `La oferta de "${product.name}" ya no está vigente. Actualiza el carrito.`
+          transaction.abort()
+          return
+        }
+        if (product.offerPrice !== requestedItem.expectedOfferPrice) {
+          failureMessage = `El precio de "${product.name}" cambió. Actualiza el carrito antes de pedir.`
+          transaction.abort()
+          return
+        }
+
+        const shopRequest = shopsStore.get(product.ownerEmail)
+        shopRequest.onsuccess = () => {
+          if (failureMessage) return
+          lines.push({ product, quantity: requestedItem.quantity, shop: shopRequest.result })
+          remainingItems -= 1
+          if (remainingItems !== 0) return
+
+          try {
+            const createdAt = new Date().toISOString()
+            createdOrders = lines.map(({ product: currentProduct, quantity, shop }) => {
+              currentProduct.stock -= quantity
+              currentProduct.updatedAt = createdAt
+              const unitPrice = currentProduct.offerPrice
+              const order = {
+                id: createId(),
+                ownerEmail: currentProduct.ownerEmail,
+                customerEmail: normalizedEmail,
+                customerName,
+                deliveryAddress,
+                productId: currentProduct.id,
+                productName: currentProduct.name,
+                shopName: shop?.name || 'Ferretería aliada',
+                quantity,
+                unitPrice,
+                total: Math.round(unitPrice * quantity * 100) / 100,
+                status: 'Recibido',
+                createdAt,
+                updatedAt: createdAt,
+              }
+              productsStore.put(currentProduct)
+              ordersStore.add(order)
+              return order
+            })
+          } catch (error) {
+            failureMessage = error instanceof Error
+              ? error.message
+              : 'No se pudieron preparar los pedidos del carrito.'
+            transaction.abort()
+          }
+        }
+      }
+    }
+
+    try {
+      await completed
+    } catch (error) {
+      if (failureMessage) throw new Error(failureMessage, { cause: error })
+      throw error
+    }
+    return createdOrders
+  } finally {
+    database.close()
+  }
+}
+
 export async function createOrder(ownerEmail, details) {
   const customerName = normalizeText(details.customerName, 'El nombre del cliente', 120)
   const deliveryAddress = details.deliveryAddress.trim().slice(0, 180)

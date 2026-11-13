@@ -14,7 +14,7 @@ function formatOfferDate(value) {
   }).format(new Date(year, month - 1, day))
 }
 
-function OfferCard({ product, onLogin }) {
+function OfferCard({ product, cartQuantity, onAddToCart, onShowDetails }) {
   return (
     <article className="market-product-card landing-offer-card">
       <div className="market-product-art">
@@ -41,16 +41,63 @@ function OfferCard({ product, onLogin }) {
             {product.offerPrice !== product.price && <small className="offer-regular-price">Precio regular: {formatCurrency(product.price)}</small>}
             <small>{product.stock} disponibles</small>
           </span>
-          <button className="button" type="button" onClick={onLogin}>Ver oferta <span aria-hidden="true">→</span></button>
+          <div className="landing-offer-actions">
+            <button className="secondary-button" type="button" onClick={() => onShowDetails(product)}>Ver detalles</button>
+            <button
+              className="button"
+              type="button"
+              onClick={() => onAddToCart(product)}
+              disabled={cartQuantity >= product.stock}
+            >
+              {cartQuantity ? `Agregar otra (${cartQuantity})` : 'Agregar al carrito'}
+            </button>
+          </div>
         </div>
       </div>
     </article>
   )
 }
 
-export default function LandingOffersSection({ onLogin }) {
+function OfferDetailsDialog({ product, onClose, onAddToCart, cartQuantity }) {
+  if (!product) return null
+
+  return (
+    <div className="dialog-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose()
+    }}>
+      <section className="dashboard-dialog offer-details-dialog" role="dialog" aria-modal="true" aria-labelledby="offer-details-title">
+        <div className="dialog-heading">
+          <div><p className="eyebrow">OFERTA VIGENTE</p><h2 id="offer-details-title">{product.name}</h2></div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Cerrar detalles">×</button>
+        </div>
+        <img className="offer-details-image" src={product.image || DEFAULT_PRODUCT_IMAGE} alt={product.name} />
+        <p className="market-shop-name"><span className="market-shop-dot" />{product.shopName}</p>
+        <p className="offer-details-description">{product.offerDescription}</p>
+        <p className="landing-offer-dates">Vigencia: del {formatOfferDate(product.offerStartDate)} al {formatOfferDate(product.offerEndDate)}</p>
+        <div className="offer-details-price">
+          <strong>{formatCurrency(product.offerPrice)}</strong>
+          {product.offerPrice !== product.price && <span>Precio regular: {formatCurrency(product.price)}</span>}
+        </div>
+        <div className="dialog-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>Seguir viendo</button>
+          <button
+            className="button"
+            type="button"
+            onClick={() => { onAddToCart(product); onClose() }}
+            disabled={cartQuantity >= product.stock}
+          >
+            {cartQuantity ? `Agregar otra (${cartQuantity} en carrito)` : 'Agregar al carrito'}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+export default function LandingOffersSection({ onAddToCart, cart, cartNotice }) {
   const [offers, setOffers] = useState([])
   const [currentPage, setCurrentPage] = useState(0)
+  const [selectedOffer, setSelectedOffer] = useState(null)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(true)
 
@@ -92,9 +139,16 @@ export default function LandingOffersSection({ onLogin }) {
           : visibleOffers.length
             ? (
               <>
+                {cartNotice && <p className="landing-offers-notice" role="status">{cartNotice}</p>}
                 <div className="market-product-grid landing-offers-grid">
                   {visibleOffers.map((product) => (
-                    <OfferCard key={product.id} product={product} onLogin={onLogin} />
+                    <OfferCard
+                      key={product.id}
+                      product={product}
+                      cartQuantity={cart.find((item) => item.product.id === product.id)?.quantity ?? 0}
+                      onAddToCart={onAddToCart}
+                      onShowDetails={setSelectedOffer}
+                    />
                   ))}
                 </div>
                 <div className="landing-offers-pagination">
@@ -127,6 +181,12 @@ export default function LandingOffersSection({ onLogin }) {
               </>
             )
             : <p className="landing-offers-message">No hay ofertas vigentes en este momento. Vuelve pronto para ver nuevas promociones.</p>}
+      <OfferDetailsDialog
+        product={selectedOffer}
+        onClose={() => setSelectedOffer(null)}
+        onAddToCart={onAddToCart}
+        cartQuantity={cart.find((item) => item.product.id === selectedOffer?.id)?.quantity ?? 0}
+      />
     </section>
   )
 }
