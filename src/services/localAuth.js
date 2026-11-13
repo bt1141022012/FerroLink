@@ -1,9 +1,13 @@
 const DATABASE_NAME = 'ferrolink-local'
-const DATABASE_VERSION = 3
+const DATABASE_VERSION = 4
 const USERS_STORE = 'users'
 const SHOPS_STORE = 'shops'
 const PRODUCTS_STORE = 'products'
 const ORDERS_STORE = 'orders'
+const IMAGE_EXAMPLES_STORE = 'imageExamples'
+const IMAGE_MODEL_STORE = 'imageModel'
+const ADMIN_EMAIL = 'admin@gmail.com'
+const ADMIN_INITIAL_PASSWORD = 'A123456789'
 const PASSWORD_ITERATIONS = 310_000
 const BACKUP_FORMAT = 'ferrolink-account-backup'
 const BACKUP_VERSION = 1
@@ -39,6 +43,12 @@ function openDatabase() {
         if (!orders.indexNames.contains('customerEmail')) {
           orders.createIndex('customerEmail', 'customerEmail', { unique: false })
         }
+      }
+      if (!database.objectStoreNames.contains(IMAGE_EXAMPLES_STORE)) {
+        database.createObjectStore(IMAGE_EXAMPLES_STORE, { keyPath: 'id' })
+      }
+      if (!database.objectStoreNames.contains(IMAGE_MODEL_STORE)) {
+        database.createObjectStore(IMAGE_MODEL_STORE, { keyPath: 'id' })
       }
     }
 
@@ -111,7 +121,12 @@ function passwordsMatch(actual, expected) {
 }
 
 function toProfile(user) {
-  return { name: user.name, email: user.email, role: user.role ?? 'merchant' }
+  return {
+    name: user.name,
+    email: user.email,
+    role: user.role ?? 'merchant',
+    requiresPasswordChange: user.requiresPasswordChange === true,
+  }
 }
 
 function createId() {
@@ -527,6 +542,97 @@ export async function getActiveOffers() {
       }))
       .sort((left, right) => left.offerEndDate.localeCompare(right.offerEndDate)
         || left.name.localeCompare(right.name))
+  } finally {
+    database.close()
+  }
+}
+
+export async function getImageTrainingExamples() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_EXAMPLES_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const examples = await requestResult(transaction.objectStore(IMAGE_EXAMPLES_STORE).getAll())
+    await completed
+    return examples.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  } finally {
+    database.close()
+  }
+}
+
+export async function saveImageTrainingExample(productId, productName, embedding) {
+  if (typeof productId !== 'string' || !productId
+    || typeof productName !== 'string' || !productName.trim() || productName.length > 120
+    || !Array.isArray(embedding) || embedding.length < 1 || embedding.length > 4096
+    || embedding.some((value) => !Number.isFinite(value))) {
+    throw new Error('La imagen o el producto seleccionado no son válidos para entrenar.')
+  }
+
+  const example = {
+    id: createId(),
+    productId,
+    productName: productName.trim(),
+    embedding,
+    createdAt: new Date().toISOString(),
+  }
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_EXAMPLES_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    await requestResult(transaction.objectStore(IMAGE_EXAMPLES_STORE).add(example))
+    await completed
+    return example
+  } finally {
+    database.close()
+  }
+}
+
+export async function deleteImageTrainingExample(exampleId) {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_EXAMPLES_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    await requestResult(transaction.objectStore(IMAGE_EXAMPLES_STORE).delete(exampleId))
+    await completed
+  } finally {
+    database.close()
+  }
+}
+
+export async function getImageModelMetadata() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_MODEL_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const metadata = await requestResult(
+      transaction.objectStore(IMAGE_MODEL_STORE).get('product-image-classifier'),
+    )
+    await completed
+    return metadata ?? null
+  } finally {
+    database.close()
+  }
+}
+
+export async function saveImageModelMetadata(metadata) {
+  if (!metadata || !Array.isArray(metadata.classes) || metadata.classes.length < 2
+    || metadata.classes.some((item) => typeof item.productId !== 'string'
+      || typeof item.productName !== 'string')
+    || !Number.isInteger(metadata.exampleCount) || metadata.exampleCount < 1) {
+    throw new Error('Los datos del modelo de búsqueda visual no son válidos.')
+  }
+  const record = {
+    ...metadata,
+    id: 'product-image-classifier',
+    trainedAt: new Date().toISOString(),
+  }
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(IMAGE_MODEL_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    await requestResult(transaction.objectStore(IMAGE_MODEL_STORE).put(record))
+    await completed
+    return record
   } finally {
     database.close()
   }
@@ -1126,6 +1232,9 @@ export async function registerLocalUser({ name, email, password, role }) {
   const normalizedName = name.trim()
   const normalizedEmail = email.trim().toLowerCase()
   const allowedRoles = ['customer', 'merchant', 'transporter']
+  if (normalizedEmail === ADMIN_EMAIL) {
+    throw new Error('Ese correo está reservado para la cuenta administradora.')
+  }
   if (normalizedName.length < 2 || normalizedName.length > 100) {
     throw new Error('El nombre debe tener entre 2 y 100 caracteres.')
   }
@@ -1174,6 +1283,58 @@ export async function registerLocalUser({ name, email, password, role }) {
   }
 }
 
+export async function ensureDefaultAdminAccount() {
+  const database = await openDatabase()
+  try {
+    const readTransaction = database.transaction(USERS_STORE, 'readonly')
+    const readCompleted = transactionComplete(readTransaction)
+    const existing = await requestResult(
+      readTransaction.objectStore(USERS_STORE).get(ADMIN_EMAIL),
+    )
+    await readCompleted
+    if (existing) {
+      if (existing.role !== 'admin') {
+        throw new Error('El correo reservado del administrador ya pertenece a otra cuenta.')
+      }
+      return
+    }
+
+    if (!globalThis.crypto?.getRandomValues) {
+      throw new Error('Este navegador no ofrece la protección criptográfica requerida.')
+    }
+    const salt = globalThis.crypto.getRandomValues(new Uint8Array(16))
+    const passwordHash = await derivePasswordHash(ADMIN_INITIAL_PASSWORD, salt)
+    const transaction = database.transaction(USERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    try {
+      await requestResult(transaction.objectStore(USERS_STORE).add({
+        name: 'Administrador',
+        email: ADMIN_EMAIL,
+        role: 'admin',
+        requiresPasswordChange: true,
+        passwordSalt: encodeBytes(salt),
+        passwordHash: encodeBytes(passwordHash),
+        createdAt: new Date().toISOString(),
+      }))
+      await completed
+    } catch (error) {
+      await completed.catch(() => {})
+      if (error.name !== 'ConstraintError') throw error
+      const currentTransaction = database.transaction(USERS_STORE, 'readonly')
+      const currentCompleted = transactionComplete(currentTransaction)
+      const currentUser = await requestResult(
+        currentTransaction.objectStore(USERS_STORE).get(ADMIN_EMAIL),
+      )
+      await currentCompleted
+      if (currentUser?.role !== 'admin') {
+        throw new Error('No se pudo inicializar la cuenta administradora.', { cause: error })
+      }
+    }
+  } finally {
+    database.close()
+  }
+}
+
 export async function authenticateLocalUser(email, password) {
   const database = await openDatabase()
 
@@ -1190,6 +1351,43 @@ export async function authenticateLocalUser(email, password) {
     const actualHash = await derivePasswordHash(password, decodeBytes(user.passwordSalt))
     const expectedHash = decodeBytes(user.passwordHash)
     return passwordsMatch(actualHash, expectedHash) ? toProfile(user) : null
+  } finally {
+    database.close()
+  }
+}
+
+export async function changeInitialAdminPassword(email, password) {
+  const normalizedEmail = email.trim().toLowerCase()
+  if (normalizedEmail !== ADMIN_EMAIL || password.length < 12) {
+    throw new Error('La contraseña nueva debe tener al menos 12 caracteres.')
+  }
+  if (password === ADMIN_INITIAL_PASSWORD) {
+    throw new Error('Elige una contraseña distinta a la contraseña inicial.')
+  }
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error('Este navegador no ofrece la protección criptográfica requerida.')
+  }
+
+  const salt = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  const passwordHash = await derivePasswordHash(password, salt)
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(USERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    const store = transaction.objectStore(USERS_STORE)
+    const user = await requestResult(store.get(normalizedEmail))
+    if (!user || user.role !== 'admin' || user.requiresPasswordChange !== true) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('La cuenta no requiere el cambio inicial de contraseña.')
+    }
+    user.passwordSalt = encodeBytes(salt)
+    user.passwordHash = encodeBytes(passwordHash)
+    user.requiresPasswordChange = false
+    user.updatedAt = new Date().toISOString()
+    await requestResult(store.put(user))
+    await completed
+    return toProfile(user)
   } finally {
     database.close()
   }

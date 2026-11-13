@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   createCustomerCartOrders,
   authenticateLocalUser,
+  changeInitialAdminPassword,
   createOrder,
   deleteProduct,
+  ensureDefaultAdminAccount,
   getOrders,
   getProducts,
   getLocalUserProfile,
@@ -28,6 +30,7 @@ import OffersCart from './components/OffersCart'
 import MerchantTransportersPage from './components/MerchantTransportersPage'
 import TransporterOrdersPage from './components/TransporterOrdersPage'
 import UserProfilePage from './components/UserProfilePage'
+import AdminTrainingPage from './components/AdminTrainingPage'
 import { formatCurrency } from './utils/formatters'
 import './App.css'
 
@@ -487,6 +490,67 @@ function LoginPage({ onBack, onAuthenticated, initialNotice = '' }) {
   )
 }
 
+function InitialAdminPasswordPage({ user, onPasswordChanged, onLogout }) {
+  const [notice, setNotice] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setNotice('')
+    const formData = new FormData(event.currentTarget)
+    const password = formData.get('newPassword')
+    if (password !== formData.get('confirmPassword')) {
+      setNotice('Las contraseñas no coinciden.')
+      return
+    }
+
+    setIsSaving(true)
+    try {
+      const profile = await changeInitialAdminPassword(user.email, password)
+      onPasswordChanged(profile)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'No se pudo actualizar la contraseña.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <main className="login-page">
+      <section className="login-showcase">
+        <div className="login-showcase-content">
+          <Brand light />
+          <p className="eyebrow">PROTECCIÓN DE LA CUENTA</p>
+          <h1>Un cambio necesario.<br /><span>Después, continúa.</span></h1>
+          <p>La contraseña inicial es temporal. Actualízala para acceder al portal de administración.</p>
+        </div>
+      </section>
+      <section className="login-panel">
+        <div className="login-form-wrap">
+          <div className="login-heading">
+            <span className="login-mark"><BrandMark /></span>
+            <p className="eyebrow">PRIMER ACCESO</p>
+            <h2>Crea una nueva contraseña</h2>
+            <p>Usa al menos 12 caracteres. Este paso es obligatorio antes de continuar.</p>
+          </div>
+          <form className="login-form" onSubmit={handleSubmit}>
+            <label htmlFor="admin-new-password">Nueva contraseña</label>
+            <input id="admin-new-password" name="newPassword" type="password" autoComplete="new-password" minLength={12} required />
+            <label htmlFor="admin-confirm-password">Confirmar contraseña</label>
+            <input id="admin-confirm-password" name="confirmPassword" type="password" autoComplete="new-password" minLength={12} required />
+            <button className="button login-submit" type="submit" disabled={isSaving}>
+              {isSaving ? 'Guardando...' : 'Guardar y continuar'}
+            </button>
+            <p className="form-notice" role="alert">{notice}</p>
+          </form>
+          <button className="auth-switch" type="button" onClick={onLogout}>Cerrar sesión</button>
+        </div>
+        <span className="login-copyright">© {new Date().getFullYear()} FerroLink</span>
+      </section>
+    </main>
+  )
+}
+
 const DASHBOARD_TABS = [
   { id: 'overview', label: 'Resumen', icon: '▦' },
   { id: 'products', label: 'Productos', icon: '▤' },
@@ -501,6 +565,7 @@ const ROLE_LABELS = {
   merchant: 'Ferretería aliada',
   customer: 'Cliente o constructor',
   transporter: 'Transportista',
+  admin: 'Administrador',
 }
 
 const ROLE_TABS = {
@@ -944,10 +1009,37 @@ function RoleDashboard({
   )
 }
 
+function AdminDashboard({ user, onLogout }) {
+  return (
+    <main className="merchant-app role-app">
+      <aside className="dashboard-sidebar">
+        <a className="brand-link dashboard-brand" href="#panel"><Brand /></a>
+        <div className="sidebar-caption">ADMINISTRACIÓN</div>
+        <nav className="dashboard-nav" aria-label="Menú de administración">
+          <span className="dashboard-nav-item selected"><span className="nav-icon" aria-hidden="true">⌕</span>Modelo visual</span>
+          <button className="dashboard-nav-item dashboard-nav-logout" type="button" onClick={onLogout}>
+            <span className="nav-icon" aria-hidden="true">↗</span>Cerrar sesión
+          </button>
+        </nav>
+        <div className="sidebar-bottom">
+          <span className="sidebar-avatar">{user.name.slice(0, 1).toUpperCase()}</span>
+          <span className="sidebar-user"><strong>{user.name}</strong><small>{ROLE_LABELS.admin}</small></span>
+          <button className="sidebar-logout" type="button" onClick={onLogout} aria-label="Cerrar sesión" title="Cerrar sesión">↗</button>
+        </div>
+      </aside>
+      <section className="dashboard-main" id="panel">
+        <header className="dashboard-topbar"><div className="dashboard-breadcrumb">FerroLink <span>/</span> Modelo visual</div><div className="topbar-profile"><span className="online-indicator" /> Sesión activa</div></header>
+        <div className="dashboard-content"><AdminTrainingPage /></div>
+      </section>
+    </main>
+  )
+}
+
 function App() {
   const [page, setPage] = useState('landing')
   const [user, setUser] = useState(null)
   const [sessionNotice, setSessionNotice] = useState('')
+  const [isInitializing, setIsInitializing] = useState(true)
   const [initialCart] = useState(readSavedOffersCart)
   const [cart, setCart] = useState(initialCart.items)
   const [cartNotice, setCartNotice] = useState(initialCart.notice)
@@ -957,6 +1049,16 @@ function App() {
     let active = true
 
     async function restoreSession() {
+      try {
+        await ensureDefaultAdminAccount()
+      } catch (error) {
+        if (active) {
+          setSessionNotice(error instanceof Error
+            ? error.message
+            : 'No se pudo inicializar la cuenta administradora.')
+        }
+      }
+
       try {
         const savedSession = localStorage.getItem('ferrolink-session')
           ?? sessionStorage.getItem('ferrolink-session')
@@ -973,11 +1075,15 @@ function App() {
         }
 
         if (active) setUser(profile)
-      } catch {
+      } catch (error) {
         if (active) {
           setPage('login')
-          setSessionNotice('No se pudo restaurar tu sesión. Inicia sesión nuevamente.')
+          setSessionNotice(error instanceof Error
+            ? `No se pudo restaurar tu sesión. ${error.message}`
+            : 'No se pudo restaurar tu sesión. Inicia sesión nuevamente.')
         }
+      } finally {
+        if (active) setIsInitializing(false)
       }
     }
 
@@ -1087,7 +1193,22 @@ function App() {
     }
   }
 
+  if (isInitializing) {
+    return <main className="login-page"><section className="login-panel"><p className="form-notice" role="status">Preparando FerroLink...</p></section></main>
+  }
+
+  if (user?.requiresPasswordChange) {
+    return <InitialAdminPasswordPage
+      user={user}
+      onPasswordChanged={setUser}
+      onLogout={handleLogout}
+    />
+  }
+
   if (user) {
+    if (user.role === 'admin') {
+      return <AdminDashboard user={user} onLogout={handleLogout} />
+    }
     const role = ['merchant', 'customer', 'transporter'].includes(user.role) ? user.role : 'merchant'
     const account = { ...user, role }
     return role === 'merchant'
