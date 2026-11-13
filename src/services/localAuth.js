@@ -770,3 +770,30 @@ export async function getLocalUserProfile(email) {
     database.close()
   }
 }
+
+export async function updateLocalUserProfile(email, details) {
+  const normalizedEmail = email.trim().toLowerCase()
+  const name = details.name.trim()
+  if (name.length < 2 || name.length > 100) {
+    throw new Error('El nombre debe tener entre 2 y 100 caracteres.')
+  }
+
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(USERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    const store = transaction.objectStore(USERS_STORE)
+    const user = await requestResult(store.get(normalizedEmail))
+    if (!user) {
+      await completed
+      throw new Error('No se encontró la cuenta para actualizar.')
+    }
+
+    user.name = name
+    await requestResult(store.put(user))
+    await completed
+    return toProfile(user)
+  } finally {
+    database.close()
+  }
+}

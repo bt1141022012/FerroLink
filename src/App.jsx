@@ -10,6 +10,7 @@ import {
   registerLocalUser,
   saveProduct,
   saveShopProfile,
+  updateLocalUserProfile,
   updateOrderStatus,
 } from './services/localAuth'
 import ProductsPage from './components/ProductsPage'
@@ -17,6 +18,7 @@ import OrdersPage, { OrdersTable } from './components/OrdersPage'
 import CustomerCatalogPage from './components/CustomerCatalogPage'
 import CustomerOrdersPage from './components/CustomerOrdersPage'
 import MerchantBackupPage from './components/MerchantBackupPage'
+import UserProfilePage from './components/UserProfilePage'
 import { formatCurrency } from './utils/formatters'
 import './App.css'
 
@@ -426,6 +428,7 @@ const DASHBOARD_TABS = [
   { id: 'orders', label: 'Pedidos', icon: '⇄' },
   { id: 'shop', label: 'Mi ferretería', icon: '⌂' },
   { id: 'backup', label: 'Respaldos', icon: '⇩' },
+  { id: 'profile', label: 'Mi perfil', icon: '◉' },
 ]
 
 const ROLE_LABELS = {
@@ -459,7 +462,7 @@ async function fetchMerchantData(ownerEmail) {
   return { shop, products, orders }
 }
 
-function MerchantDashboard({ user, onLogout, notice }) {
+function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
   const [activeTab, setActiveTab] = useState('overview')
   const [shop, setShop] = useState({ name: '', phone: '', address: '' })
   const [products, setProducts] = useState([])
@@ -667,13 +670,14 @@ function MerchantDashboard({ user, onLogout, notice }) {
           />}
           {activeTab === 'shop' && renderShop()}
           {activeTab === 'backup' && renderBackup()}
+          {activeTab === 'profile' && <UserProfilePage user={user} onSave={onProfileUpdate} />}
         </div>
       </section>
     </main>
   )
 }
 
-function RoleDashboard({ user, onLogout, notice }) {
+function RoleDashboard({ user, onLogout, notice, onProfileUpdate }) {
   const [activeTab, setActiveTab] = useState('overview')
   const tabs = ROLE_TABS[user.role]
   const selectedTab = tabs.find((tab) => tab.id === activeTab) ?? tabs[0]
@@ -718,16 +722,7 @@ function RoleDashboard({ user, onLogout, notice }) {
     }
 
     if (activeTab === 'profile') {
-      return (
-        <section className="dashboard-panel role-profile-panel">
-          <div className="panel-heading"><div><h2>Datos de la cuenta</h2><p>Información asociada a tu perfil.</p></div></div>
-          <div className="role-profile-details">
-            <div><span>Nombre</span><strong>{user.name}</strong></div>
-            <div><span>Correo electrónico</span><strong>{user.email}</strong></div>
-            <div><span>Tipo de usuario</span><strong>{ROLE_LABELS[user.role]}</strong></div>
-          </div>
-        </section>
-      )
+      return <UserProfilePage user={user} onSave={onProfileUpdate} />
     }
 
     if (activeTab !== 'overview') {
@@ -847,6 +842,12 @@ function App() {
     setUser(profile)
   }
 
+  async function handleProfileUpdate(name) {
+    const updatedProfile = await updateLocalUserProfile(user.email, { name })
+    setUser(updatedProfile)
+    return updatedProfile
+  }
+
   function handleLogout() {
     try {
       localStorage.removeItem('ferrolink-session')
@@ -862,8 +863,8 @@ function App() {
     const role = ['merchant', 'customer', 'transporter'].includes(user.role) ? user.role : 'merchant'
     const account = { ...user, role }
     return role === 'merchant'
-      ? <MerchantDashboard user={account} onLogout={handleLogout} notice={sessionNotice} />
-      : <RoleDashboard user={account} onLogout={handleLogout} notice={sessionNotice} />
+      ? <MerchantDashboard user={account} onLogout={handleLogout} notice={sessionNotice} onProfileUpdate={handleProfileUpdate} />
+      : <RoleDashboard user={account} onLogout={handleLogout} notice={sessionNotice} onProfileUpdate={handleProfileUpdate} />
   }
 
   return page === 'login'
