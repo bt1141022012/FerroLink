@@ -1,16 +1,24 @@
-# React + Vite
+# FerroLink
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Aplicación web de FerroLink, construida con React y Vite.
 
-Currently, two official plugins are available:
+## Desarrollo local
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```sh
+npm ci
+npm run dev
+```
 
-## React Compiler
+Verifica los cambios con `npm run lint` y genera la versión de producción con `npm run build`.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Publicación en GitHub Pages
 
-## Expanding the ESLint configuration
+El workflow [Deploy to GitHub Pages](./.github/workflows/deploy-pages.yml) ejecuta lint, compila la aplicación y publica `dist` al hacer push a `main` (o al iniciarlo manualmente desde Actions). Vite usa la ruta `/FerroLink/` para Pages y `/` en desarrollo local.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+En GitHub, habilita Pages en **Settings → Pages → Build and deployment → Source: GitHub Actions**. Después del primer despliegue, la aplicación estará en:
+
+<https://bt1141022012.github.io/FerroLink/>
+
+El repositorio actualmente es privado. La disponibilidad de GitHub Pages para un repositorio privado depende del plan de GitHub; si Pages no permite activarlo, cambia la visibilidad del repositorio a pública o usa un plan compatible.
+
+La aplicación guarda perfiles, productos e información de prueba en IndexedDB del navegador. Los datos no se publican junto al sitio ni se sincronizan entre dispositivos.
