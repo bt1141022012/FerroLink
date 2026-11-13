@@ -31,6 +31,12 @@ async function prepareProductImage(file) {
 
 function ProductDialog({ product, onClose, onSave, isSaving }) {
   const [image, setImage] = useState(product?.image ?? '')
+  const [name, setName] = useState(product?.name ?? '')
+  const [price, setPrice] = useState(String(product?.price ?? ''))
+  const [isOffer, setIsOffer] = useState(product?.isOffer ?? false)
+  const [offerPrice, setOfferPrice] = useState(String(product?.offerPrice ?? product?.price ?? ''))
+  const [offerDescription, setOfferDescription] = useState(product?.offerDescription ?? product?.name ?? '')
+  const [offerStartDate, setOfferStartDate] = useState(product?.offerStartDate ?? '')
   const [imageError, setImageError] = useState('')
   const [isProcessingImage, setIsProcessingImage] = useState(false)
 
@@ -45,6 +51,11 @@ function ProductDialog({ product, onClose, onSave, isSaving }) {
       price: formData.get('price'),
       stock: formData.get('stock'),
       available: formData.has('available'),
+      isOffer,
+      offerPrice: formData.get('offerPrice'),
+      offerDescription: formData.get('offerDescription'),
+      offerStartDate: formData.get('offerStartDate'),
+      offerEndDate: formData.get('offerEndDate'),
       image,
     })
   }
@@ -78,7 +89,7 @@ function ProductDialog({ product, onClose, onSave, isSaving }) {
           <button className="icon-button" type="button" onClick={onClose} aria-label="Cerrar">×</button>
         </div>
         <form className="dashboard-form" onSubmit={handleSubmit}>
-          <label>Nombre del producto<input name="name" defaultValue={product?.name ?? ''} maxLength={120} placeholder="Ej. Cemento gris 42.5 kg" required /></label>
+          <label>Nombre del producto<input name="name" value={name} onChange={(event) => setName(event.target.value)} maxLength={120} placeholder="Ej. Cemento gris 42.5 kg" required /></label>
           <div className="form-grid">
             <label>Categoría
               <select name="category" defaultValue={product?.category ?? PRODUCT_CATEGORIES[0]}>
@@ -88,7 +99,7 @@ function ProductDialog({ product, onClose, onSave, isSaving }) {
             <label>Código / SKU <span className="optional-label">Opcional</span><input name="sku" defaultValue={product?.sku ?? ''} maxLength={60} placeholder="Ej. CEM-001" /></label>
           </div>
           <div className="form-grid">
-            <label>Precio (USD)<input name="price" type="number" min="0" step="0.01" defaultValue={product?.price ?? ''} placeholder="0.00" required /></label>
+            <label>Precio (USD)<input name="price" type="number" min="0" step="0.01" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="0.00" required /></label>
             <label>Existencias<input name="stock" type="number" min="0" step="1" defaultValue={product?.stock ?? 0} required /></label>
           </div>
           <div className="product-image-field">
@@ -109,6 +120,61 @@ function ProductDialog({ product, onClose, onSave, isSaving }) {
             {imageError && <span className="image-error" role="alert">{imageError}</span>}
           </div>
           <label className="dashboard-checkbox"><input type="checkbox" name="available" defaultChecked={product?.available ?? true} /><span>Disponible para la venta</span></label>
+          <label className="dashboard-checkbox"><input type="checkbox" checked={isOffer} onChange={(event) => {
+            const enabled = event.target.checked
+            setIsOffer(enabled)
+            if (enabled) {
+              setOfferPrice(price)
+              setOfferDescription(name)
+            }
+          }} /><span>Incluir en ofertas durante un rango de fechas</span></label>
+          {isOffer && (
+            <>
+              <div className="form-grid">
+                <label>Precio de oferta (USD)
+                  <input
+                    name="offerPrice"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={offerPrice}
+                    onChange={(event) => setOfferPrice(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>Descripción de la oferta
+                  <input
+                    name="offerDescription"
+                    type="text"
+                    maxLength={240}
+                    value={offerDescription}
+                    onChange={(event) => setOfferDescription(event.target.value)}
+                    required
+                  />
+                </label>
+              </div>
+              <div className="form-grid offer-date-fields">
+                <label>Fecha de inicio
+                  <input
+                    name="offerStartDate"
+                    type="date"
+                    value={offerStartDate}
+                    onChange={(event) => setOfferStartDate(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>Fecha de finalización
+                  <input
+                    name="offerEndDate"
+                    type="date"
+                    min={offerStartDate || undefined}
+                    defaultValue={product?.offerEndDate ?? ''}
+                    required
+                  />
+                </label>
+              </div>
+            </>
+          )}
           <div className="dialog-actions">
             <button className="secondary-button" type="button" onClick={onClose}>Cancelar</button>
             <button className="button" type="submit" disabled={isSaving || isProcessingImage}>{isSaving ? 'Guardando...' : 'Guardar producto'}</button>
@@ -134,7 +200,7 @@ function ProductTable({ products, onEdit, onDelete, onToggleAvailability, isSavi
   return (
     <div className="table-scroll">
       <table className="data-table">
-        <thead><tr><th>Producto</th><th>Categoría</th><th>Precio</th><th>Existencias</th><th>Estado</th><th><span className="sr-only">Acciones</span></th></tr></thead>
+        <thead><tr><th>Producto</th><th>Categoría</th><th>Precio</th><th>Existencias</th><th>Estado</th><th>Oferta</th><th><span className="sr-only">Acciones</span></th></tr></thead>
         <tbody>
           {products.map((product) => (
             <tr key={product.id}>
@@ -146,6 +212,9 @@ function ProductTable({ products, onEdit, onDelete, onToggleAvailability, isSavi
               <td className="table-emphasis">{formatCurrency(product.price)}</td>
               <td><span className={`stock-count${product.stock < 5 ? ' stock-low' : ''}`}>{product.stock}</span></td>
               <td><button className={`status-pill ${product.available ? 'status-available' : 'status-paused'}`} type="button" onClick={() => onToggleAvailability(product)} disabled={isSaving}>{product.available ? 'Disponible' : 'Pausado'}</button></td>
+              <td>{product.isOffer
+                ? <span className="product-offer-range">{formatCurrency(product.offerPrice)} · {product.offerStartDate} – {product.offerEndDate}</span>
+                : '—'}</td>
               <td><div className="row-actions"><button type="button" onClick={() => onEdit(product)}>Editar</button><button type="button" className="delete-action" onClick={() => onDelete(product)}>Eliminar</button></div></td>
             </tr>
           ))}

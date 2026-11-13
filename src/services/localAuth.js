@@ -146,6 +146,19 @@ function validateStock(value) {
   return stock
 }
 
+function isValidDateOnly(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+function getLocalDateOnly() {
+  const now = new Date()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${now.getFullYear()}-${month}-${day}`
+}
+
 async function getAccountRecords(storeName, ownerEmail) {
   const database = await openDatabase()
   try {
@@ -263,6 +276,16 @@ function validateAccountBackup(backup, ownerEmail) {
       || !Number.isFinite(product.price) || product.price < 0
       || !Number.isInteger(product.stock) || product.stock < 0
       || typeof product.available !== 'boolean'
+      || (product.isOffer !== undefined && typeof product.isOffer !== 'boolean')
+      || (product.isOffer === true
+        && (!isValidDateOnly(product.offerStartDate)
+          || !isValidDateOnly(product.offerEndDate)
+          || product.offerEndDate < product.offerStartDate
+          || !Number.isFinite(product.offerPrice)
+          || product.offerPrice < 0
+          || typeof product.offerDescription !== 'string'
+          || !product.offerDescription.trim()
+          || product.offerDescription.length > 240))
       || (product.image !== undefined
         && (typeof product.image !== 'string' || product.image.length > MAX_PRODUCT_IMAGE_LENGTH
           || !/^data:image\/(?:jpeg|png|webp);base64,/.test(product.image)))) {
@@ -357,6 +380,43 @@ export async function getPublicCatalogProducts() {
   }
 }
 
+export async function getActiveOffers() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction([PRODUCTS_STORE, SHOPS_STORE], 'readonly')
+    const completed = transactionComplete(transaction)
+    const productsRequest = transaction.objectStore(PRODUCTS_STORE).getAll()
+    const shopsRequest = transaction.objectStore(SHOPS_STORE).getAll()
+    const [products, shops] = await Promise.all([
+      requestResult(productsRequest),
+      requestResult(shopsRequest),
+    ])
+    await completed
+
+    const today = getLocalDateOnly()
+    const shopNames = new Map(shops.map((shop) => [shop.ownerEmail, shop.name]))
+    return products
+      .filter((product) => product.isOffer === true
+        && product.available
+        && product.stock > 0
+        && Number.isFinite(product.offerPrice)
+        && typeof product.offerDescription === 'string'
+        && product.offerDescription.trim()
+        && isValidDateOnly(product.offerStartDate)
+        && isValidDateOnly(product.offerEndDate)
+        && product.offerStartDate <= today
+        && product.offerEndDate >= today)
+      .map((product) => ({
+        ...product,
+        shopName: shopNames.get(product.ownerEmail) || 'Ferretería aliada',
+      }))
+      .sort((left, right) => left.offerEndDate.localeCompare(right.offerEndDate)
+        || left.name.localeCompare(right.name))
+  } finally {
+    database.close()
+  }
+}
+
 export async function saveProduct(ownerEmail, productDetails) {
   const name = normalizeText(productDetails.name, 'El nombre del producto', 120)
   const category = normalizeText(productDetails.category, 'La categoría', 80)
@@ -368,6 +428,23 @@ export async function saveProduct(ownerEmail, productDetails) {
     || (image && !/^data:image\/(?:jpeg|png|webp);base64,/.test(image)))) {
     throw new Error('La imagen debe ser JPG, PNG o WebP y no superar el límite permitido.')
   }
+  const isOffer = productDetails.isOffer === true
+  const offerStartDate = isOffer ? productDetails.offerStartDate : ''
+  const offerEndDate = isOffer ? productDetails.offerEndDate : ''
+  if (isOffer && (!isValidDateOnly(offerStartDate)
+    || !isValidDateOnly(offerEndDate)
+    || offerEndDate < offerStartDate)) {
+    throw new Error('Ingresa un rango de fechas válido para la oferta.')
+  }
+  if (isOffer && (productDetails.offerPrice === undefined
+    || productDetails.offerPrice === null
+    || productDetails.offerPrice === '')) {
+    throw new Error('Ingresa un precio de oferta válido.')
+  }
+  const offerPrice = isOffer ? validatePrice(productDetails.offerPrice) : null
+  const offerDescription = isOffer
+    ? normalizeText(productDetails.offerDescription, 'La descripción de la oferta', 240)
+    : ''
   const database = await openDatabase()
 
   try {
@@ -391,6 +468,11 @@ export async function saveProduct(ownerEmail, productDetails) {
       price,
       stock,
       available: productDetails.available ?? true,
+      isOffer,
+      offerPrice,
+      offerDescription,
+      offerStartDate,
+      offerEndDate,
       image: image ?? existing?.image ?? '',
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),

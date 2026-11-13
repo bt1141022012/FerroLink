@@ -18,6 +18,7 @@ import OrdersPage, { OrdersTable } from './components/OrdersPage'
 import CustomerCatalogPage from './components/CustomerCatalogPage'
 import CustomerOrdersPage from './components/CustomerOrdersPage'
 import MerchantBackupPage from './components/MerchantBackupPage'
+import LandingOffersSection from './components/LandingOffersSection'
 import UserProfilePage from './components/UserProfilePage'
 import { formatCurrency } from './utils/formatters'
 import './App.css'
@@ -69,6 +70,7 @@ function LandingPage({ onLogin }) {
         </a>
         <nav className="main-nav" aria-label="Navegación principal">
           <a href="#oferta">Qué ofrecemos</a>
+          <a href="#ofertas">Ofertas</a>
           <a href="#para-quien">Para quién</a>
           <a href="#involucrados">Involucrados</a>
           <a href="#contacto">Contacto</a>
@@ -158,6 +160,8 @@ function LandingPage({ onLogin }) {
             </article>
           </div>
         </section>
+
+        <LandingOffersSection onLogin={onLogin} />
 
         <section className="audience-section" id="para-quien">
           <div className="section-intro">
