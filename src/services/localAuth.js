@@ -188,20 +188,124 @@ export async function getShopProfile(ownerEmail) {
 }
 
 export async function saveShopProfile(ownerEmail, details) {
-  const profile = {
-    ownerEmail,
-    name: normalizeText(details.name, 'El nombre de la ferretería', 120),
-    phone: details.phone.trim().slice(0, 40),
-    address: details.address.trim().slice(0, 180),
-    updatedAt: new Date().toISOString(),
-  }
   const database = await openDatabase()
   try {
     const transaction = database.transaction(SHOPS_STORE, 'readwrite')
     const completed = transactionComplete(transaction)
-    await requestResult(transaction.objectStore(SHOPS_STORE).put(profile))
+    const store = transaction.objectStore(SHOPS_STORE)
+    const existing = await requestResult(store.get(ownerEmail))
+    const profile = {
+      ...existing,
+      ownerEmail,
+      name: normalizeText(details.name, 'El nombre de la ferretería', 120),
+      phone: details.phone.trim().slice(0, 40),
+      address: details.address.trim().slice(0, 180),
+      transporterEmails: existing?.transporterEmails ?? [],
+      updatedAt: new Date().toISOString(),
+    }
+    await requestResult(store.put(profile))
     await completed
     return profile
+  } finally {
+    database.close()
+  }
+}
+
+export async function getTransporterUsers() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(USERS_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const users = await requestResult(transaction.objectStore(USERS_STORE).getAll())
+    await completed
+    return users
+      .filter((user) => user.role === 'transporter')
+      .map(toProfile)
+      .sort((left, right) => left.name.localeCompare(right.name))
+  } finally {
+    database.close()
+  }
+}
+
+export async function saveShopTransporters(ownerEmail, transporterEmails) {
+  if (!Array.isArray(transporterEmails)) {
+    throw new Error('Selecciona una lista válida de transportistas.')
+  }
+  const normalizedEmails = [...new Set(transporterEmails.map((email) => {
+    if (typeof email !== 'string') throw new Error('La selección contiene un transportista inválido.')
+    return email.trim().toLowerCase()
+  }))]
+  if (normalizedEmails.length > 200) {
+    throw new Error('La ferretería no puede asociar más de 200 transportistas.')
+  }
+
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction([USERS_STORE, SHOPS_STORE], 'readwrite')
+    const completed = transactionComplete(transaction)
+    const usersStore = transaction.objectStore(USERS_STORE)
+    const shopsStore = transaction.objectStore(SHOPS_STORE)
+    const usersRequest = usersStore.getAll()
+    const shopRequest = shopsStore.get(ownerEmail)
+    const [users, existingShop] = await Promise.all([
+      requestResult(usersRequest),
+      requestResult(shopRequest),
+    ])
+    const userRoles = new Map(users.map((user) => [user.email, user.role]))
+    if (normalizedEmails.some((email) => userRoles.get(email) !== 'transporter')) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Solo se pueden asociar cuentas registradas como transportistas.')
+    }
+
+    const profile = {
+      ...existingShop,
+      ownerEmail,
+      name: existingShop?.name ?? '',
+      phone: existingShop?.phone ?? '',
+      address: existingShop?.address ?? '',
+      transporterEmails: normalizedEmails,
+      updatedAt: new Date().toISOString(),
+    }
+    await requestResult(shopsStore.put(profile))
+    await completed
+    return users
+      .filter((user) => normalizedEmails.includes(user.email) && user.role === 'transporter')
+      .map(toProfile)
+      .sort((left, right) => left.name.localeCompare(right.name))
+  } finally {
+    database.close()
+  }
+}
+
+export async function getTransporterOrders(transporterEmail) {
+  const normalizedEmail = transporterEmail.trim().toLowerCase()
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(ORDERS_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const orders = await requestResult(transaction.objectStore(ORDERS_STORE).getAll())
+    await completed
+    return orders
+      .filter((order) => order.transporterEmail === normalizedEmail)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+  } finally {
+    database.close()
+  }
+}
+
+export async function getBusyTransporterEmails() {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(ORDERS_STORE, 'readonly')
+    const completed = transactionComplete(transaction)
+    const orders = await requestResult(transaction.objectStore(ORDERS_STORE).getAll())
+    await completed
+    return [...new Set(orders
+      .filter((order) => order.transporterEmail
+        && !['Entregado', 'Cancelado'].includes(order.status)
+        && !['Entregado', 'No aceptado', 'Cancelado'].includes(order.deliveryStatus))
+      .map((order) => order.transporterEmail))]
   } finally {
     database.close()
   }
@@ -263,7 +367,13 @@ function validateAccountBackup(backup, ownerEmail) {
     throw new Error('El respaldo contiene listas de productos o pedidos inválidas.')
   }
   if (backup.shop !== null
-    && (!backup.shop || typeof backup.shop !== 'object' || backup.shop.ownerEmail !== ownerEmail)) {
+    && (!backup.shop
+      || typeof backup.shop !== 'object'
+      || backup.shop.ownerEmail !== ownerEmail
+      || (backup.shop.transporterEmails !== undefined
+        && (!Array.isArray(backup.shop.transporterEmails)
+          || backup.shop.transporterEmails.length > 200
+          || backup.shop.transporterEmails.some((email) => typeof email !== 'string'))))) {
     throw new Error('El perfil de ferretería del respaldo no es válido.')
   }
 
@@ -304,7 +414,12 @@ function validateAccountBackup(backup, ownerEmail) {
       || !Number.isInteger(order.quantity) || order.quantity < 1
       || !Number.isFinite(order.total) || order.total < 0
       || !statuses.includes(order.status)
-      || (order.customerEmail !== undefined && typeof order.customerEmail !== 'string')) {
+      || (order.customerEmail !== undefined && typeof order.customerEmail !== 'string')
+      || (order.transporterEmail !== undefined && typeof order.transporterEmail !== 'string')
+      || (order.transporterName !== undefined && typeof order.transporterName !== 'string')
+      || (order.deliveryStatus !== undefined
+        && !['Pendiente de aceptación', 'Aceptado', 'En camino', 'Entregado', 'No aceptado', 'Cancelado', '']
+          .includes(order.deliveryStatus))) {
       throw new Error('El respaldo contiene datos de pedido inválidos.')
     }
     orderIds.add(order.id)
@@ -849,6 +964,7 @@ export async function updateOrderStatus(ownerEmail, orderId, status) {
             productsStore.put(product)
           }
           order.status = status
+          if (order.transporterEmail) order.deliveryStatus = 'Cancelado'
           order.updatedAt = new Date().toISOString()
           updatedOrder = order
           ordersStore.put(order)
@@ -859,6 +975,7 @@ export async function updateOrderStatus(ownerEmail, orderId, status) {
           return
         }
         order.status = status
+        if (status === 'Entregado' && order.transporterEmail) order.deliveryStatus = 'Entregado'
         order.updatedAt = new Date().toISOString()
         updatedOrder = order
         ordersStore.put(order)
@@ -880,6 +997,126 @@ export async function updateOrderStatus(ownerEmail, orderId, status) {
       throw error
     }
     return updatedOrder
+  } finally {
+    database.close()
+  }
+}
+
+export async function updateOrderTransporter(ownerEmail, orderId, transporterEmail) {
+  const normalizedEmail = transporterEmail ? transporterEmail.trim().toLowerCase() : ''
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(
+      [ORDERS_STORE, SHOPS_STORE, USERS_STORE],
+      'readwrite',
+    )
+    const completed = transactionComplete(transaction)
+    const ordersStore = transaction.objectStore(ORDERS_STORE)
+    const orderRequest = ordersStore.get(orderId)
+    const order = await requestResult(orderRequest)
+
+    if (!order || order.ownerEmail !== ownerEmail) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('No se encontró el pedido solicitado.')
+    }
+    if (['Entregado', 'Cancelado'].includes(order.status)) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('No se puede asignar un transportista a un pedido finalizado.')
+    }
+
+    let transporter = null
+    if (normalizedEmail) {
+      const shopRequest = transaction.objectStore(SHOPS_STORE).get(ownerEmail)
+      const userRequest = transaction.objectStore(USERS_STORE).get(normalizedEmail)
+      const [shop, user] = await Promise.all([
+        requestResult(shopRequest),
+        requestResult(userRequest),
+      ])
+      if (!Array.isArray(shop?.transporterEmails)
+        || !shop.transporterEmails.includes(normalizedEmail)) {
+        transaction.abort()
+        await completed.catch(() => {})
+        throw new Error('Asocia este transportista a tu ferretería antes de asignarlo al pedido.')
+      }
+      if (user?.role !== 'transporter') {
+        transaction.abort()
+        await completed.catch(() => {})
+        throw new Error('La cuenta seleccionada no está registrada como transportista.')
+      }
+      const allOrdersRequest = ordersStore.getAll()
+      const allOrders = await requestResult(allOrdersRequest)
+      const hasAnotherOpenOrder = allOrders.some((candidate) => candidate.id !== order.id
+        && candidate.transporterEmail === normalizedEmail
+        && !['Entregado', 'Cancelado'].includes(candidate.status)
+        && !['Entregado', 'No aceptado', 'Cancelado'].includes(candidate.deliveryStatus))
+      if (hasAnotherOpenOrder) {
+        transaction.abort()
+        await completed.catch(() => {})
+        throw new Error('Este camionero ya tiene otro pedido abierto. Asígnalo cuando termine o rechace esa entrega.')
+      }
+      transporter = user
+    }
+
+    const isSameTransporter = order.transporterEmail === transporter?.email
+    order.transporterEmail = transporter?.email ?? ''
+    order.transporterName = transporter?.name ?? ''
+    order.deliveryStatus = transporter
+      ? (isSameTransporter && !['No aceptado', 'Entregado', 'Cancelado'].includes(order.deliveryStatus)
+        ? order.deliveryStatus || 'Pendiente de aceptación'
+        : 'Pendiente de aceptación')
+      : ''
+    order.updatedAt = new Date().toISOString()
+    await requestResult(ordersStore.put(order))
+    await completed
+    return order
+  } finally {
+    database.close()
+  }
+}
+
+export async function updateTransporterOrderStatus(transporterEmail, orderId, status) {
+  const normalizedEmail = transporterEmail.trim().toLowerCase()
+  const transitions = {
+    'Pendiente de aceptación': ['Aceptado', 'No aceptado'],
+    Aceptado: ['En camino'],
+    'En camino': ['Entregado'],
+    Entregado: [],
+    'No aceptado': [],
+    Cancelado: [],
+  }
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(ORDERS_STORE, 'readwrite')
+    const completed = transactionComplete(transaction)
+    const store = transaction.objectStore(ORDERS_STORE)
+    const orderRequest = store.get(orderId)
+    const order = await requestResult(orderRequest)
+
+    if (!order || order.transporterEmail !== normalizedEmail) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Este pedido no está asignado a tu cuenta.')
+    }
+    if (['Entregado', 'Cancelado'].includes(order.status)) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Este pedido ya fue finalizado por la ferretería.')
+    }
+    const currentDeliveryStatus = order.deliveryStatus || 'Pendiente de aceptación'
+    if (!transitions[currentDeliveryStatus]?.includes(status)) {
+      transaction.abort()
+      await completed.catch(() => {})
+      throw new Error('Ese cambio de estado no está permitido para esta entrega.')
+    }
+
+    order.deliveryStatus = status
+    if (status === 'Entregado') order.status = 'Entregado'
+    order.updatedAt = new Date().toISOString()
+    await requestResult(store.put(order))
+    await completed
+    return order
   } finally {
     database.close()
   }

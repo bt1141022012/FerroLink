@@ -2286,7 +2286,7 @@
 }
 
 .customer-orders-table {
-  min-width: 830px;
+  min-width: 930px;
 }
 
 .customer-order-status {
@@ -2426,7 +2426,7 @@
   }
 
   .customer-orders-table {
-    min-width: 830px;
+    min-width: 930px;
   }
 
   .dashboard-dialog .checkout-product + .dashboard-form .form-grid {
@@ -3105,6 +3105,106 @@
   font-size: 9px;
 }
 
+.order-transporter-select {
+  width: 160px;
+  max-width: 190px;
+  padding: 7px 24px 7px 9px;
+  border: 1px solid #e6eaed;
+  border-radius: 5px;
+  background: #fff;
+  color: #526576;
+  font: inherit;
+  font-size: 9px;
+}
+
+.transporter-association-form {
+  padding: 17px 20px 20px;
+}
+
+.transporter-choice-list {
+  display: grid;
+  gap: 8px;
+}
+
+.transporter-choice {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid #e8edf0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.transporter-choice > input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+.transporter-choice-avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: #edf4fa;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.transporter-choice-details {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.transporter-choice-details strong {
+  overflow: hidden;
+  color: #354c60;
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.transporter-choice-details small {
+  overflow: hidden;
+  color: #81909d;
+  font-size: 9px;
+  text-overflow: ellipsis;
+}
+
+.transporter-choice-role {
+  margin-left: auto;
+  color: #718497;
+  font-size: 9px;
+}
+
+.transporter-association-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.transporter-association-actions > span {
+  color: #4c8b6e;
+  font-size: 10px;
+}
+
+.transporter-orders-table {
+  min-width: 1200px;
+}
+
+.transporter-orders-table .order-status-select {
+  max-width: 180px;
+}
+
 .order-status-recibido {
   border-color: #eadfc3;
   background: #fbf7eb;
@@ -3562,8 +3662,10 @@
   }
 
   .orders-table {
-    min-width: 850px;
+    min-width: 1050px;
   }
+
+  .transporter-orders-table { min-width: 1200px; }
 }
 
 @media (max-width: 680px) {
@@ -3727,7 +3829,7 @@
   }
 
   .orders-table {
-    min-width: 850px;
+    min-width: 1050px;
   }
 
   .dashboard-empty {

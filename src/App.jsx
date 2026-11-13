@@ -7,11 +7,15 @@ import {
   getOrders,
   getProducts,
   getLocalUserProfile,
+  getBusyTransporterEmails,
   getShopProfile,
+  getTransporterUsers,
   registerLocalUser,
   saveProduct,
   saveShopProfile,
+  saveShopTransporters,
   updateLocalUserProfile,
+  updateOrderTransporter,
   updateOrderStatus,
 } from './services/localAuth'
 import ProductsPage from './components/ProductsPage'
@@ -21,6 +25,8 @@ import CustomerOrdersPage from './components/CustomerOrdersPage'
 import MerchantBackupPage from './components/MerchantBackupPage'
 import LandingOffersSection from './components/LandingOffersSection'
 import OffersCart from './components/OffersCart'
+import MerchantTransportersPage from './components/MerchantTransportersPage'
+import TransporterOrdersPage from './components/TransporterOrdersPage'
 import UserProfilePage from './components/UserProfilePage'
 import { formatCurrency } from './utils/formatters'
 import './App.css'
@@ -485,6 +491,7 @@ const DASHBOARD_TABS = [
   { id: 'overview', label: 'Resumen', icon: '▦' },
   { id: 'products', label: 'Productos', icon: '▤' },
   { id: 'orders', label: 'Pedidos', icon: '⇄' },
+  { id: 'transporters', label: 'Camioneros', icon: '↗' },
   { id: 'shop', label: 'Mi ferretería', icon: '⌂' },
   { id: 'backup', label: 'Respaldos', icon: '⇩' },
   { id: 'profile', label: 'Mi perfil', icon: '◉' },
@@ -508,19 +515,21 @@ const ROLE_TABS = {
   ],
   transporter: [
     { id: 'overview', label: 'Inicio', icon: '▦' },
-    { id: 'deliveries', label: 'Entregas disponibles', icon: '↗' },
+    { id: 'deliveries', label: 'Mis entregas', icon: '↗' },
     { id: 'delivery-history', label: 'Mi historial', icon: '◷' },
     { id: 'profile', label: 'Mi perfil', icon: '◉' },
   ],
 }
 
 async function fetchMerchantData(ownerEmail) {
-  const [shop, products, orders] = await Promise.all([
+  const [shop, products, orders, transporters, busyTransporterEmails] = await Promise.all([
     getShopProfile(ownerEmail),
     getProducts(ownerEmail),
     getOrders(ownerEmail),
+    getTransporterUsers(),
+    getBusyTransporterEmails(),
   ])
-  return { shop, products, orders }
+  return { shop, products, orders, transporters, busyTransporterEmails }
 }
 
 function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
@@ -528,6 +537,8 @@ function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
   const [shop, setShop] = useState({ name: '', phone: '', address: '' })
   const [products, setProducts] = useState([])
   const [orders, setOrders] = useState([])
+  const [transporters, setTransporters] = useState([])
+  const [busyTransporterEmails, setBusyTransporterEmails] = useState([])
   const [feedback, setFeedback] = useState(notice)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -538,6 +549,8 @@ function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
       setShop(data.shop)
       setProducts(data.products)
       setOrders(data.orders)
+      setTransporters(data.transporters)
+      setBusyTransporterEmails(data.busyTransporterEmails)
       return true
     } catch (error) {
       setFeedback(error instanceof Error ? error.message : 'No se pudo cargar el panel.')
@@ -555,6 +568,8 @@ function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
         setShop(data.shop)
         setProducts(data.products)
         setOrders(data.orders)
+        setTransporters(data.transporters)
+        setBusyTransporterEmails(data.busyTransporterEmails)
       })
       .catch((error) => {
         if (active) setFeedback(error instanceof Error ? error.message : 'No se pudo cargar el panel.')
@@ -615,6 +630,20 @@ function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
     )
   }
 
+  async function handleOrderTransporterChange(order, transporterEmail) {
+    await performAction(
+      () => updateOrderTransporter(user.email, order.id, transporterEmail),
+      transporterEmail ? 'Camionero asignado al pedido.' : 'Camionero retirado del pedido.',
+    )
+  }
+
+  async function handleTransportersSave(transporterEmails) {
+    return performAction(
+      () => saveShopTransporters(user.email, transporterEmails),
+      'Transportistas asociados actualizados.',
+    )
+  }
+
   async function handleShopSave(event) {
     event.preventDefault()
     const formData = new FormData(event.currentTarget)
@@ -656,7 +685,14 @@ function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
         <section className="dashboard-panel">
           <div className="panel-heading"><div><h2>Pedidos recientes</h2><p>Revisa su estado y continúa con la siguiente etapa.</p></div><button className="plain-link" type="button" onClick={() => setActiveTab('orders')}>Ver todos <ArrowIcon /></button></div>
           {recentOrders.length
-            ? <OrdersTable orders={recentOrders} onStatusChange={handleOrderStatus} />
+            ? <OrdersTable
+              orders={recentOrders}
+              allOrders={orders}
+              onStatusChange={handleOrderStatus}
+              transporters={transporters.filter((transporter) => shop.transporterEmails?.includes(transporter.email))}
+              busyTransporterEmails={busyTransporterEmails}
+              onTransporterChange={handleOrderTransporterChange}
+            />
             : <div className="compact-empty">Los pedidos que registres aparecerán aquí.</div>}
         </section>
       </>
@@ -726,7 +762,17 @@ function MerchantDashboard({ user, onLogout, notice, onProfileUpdate }) {
             products={products}
             onCreateOrder={handleOrderCreate}
             onStatusChange={handleOrderStatus}
+            transporters={transporters.filter((transporter) => shop.transporterEmails?.includes(transporter.email))}
+            busyTransporterEmails={busyTransporterEmails}
+            onTransporterChange={handleOrderTransporterChange}
             isLoading={isLoading}
+            isSaving={isSaving}
+          />}
+          {activeTab === 'transporters' && <MerchantTransportersPage
+            key={`${transporters.map((transporter) => transporter.email).join(',')}|${shop.transporterEmails?.join(',') ?? ''}`}
+            transporters={transporters}
+            associatedEmails={shop.transporterEmails ?? []}
+            onSave={handleTransportersSave}
             isSaving={isSaving}
           />}
           {activeTab === 'shop' && renderShop()}
@@ -778,8 +824,8 @@ function RoleDashboard({
       title: 'Conecta con nuevas oportunidades de entrega.',
       description: 'Organiza tus entregas y mantén a la mano la información de cada recorrido.',
       cards: [
-        ['deliveries', '↗', 'Encuentra entregas', 'Consulta solicitudes de transporte de ferreterías aliadas.'],
-        ['delivery-history', '◷', 'Actualiza recorridos', 'Mantén al día las etapas de preparación y entrega.'],
+        ['deliveries', '↗', 'Revisa tus entregas', 'Consulta los pedidos que las ferreterías te han asignado.'],
+        ['delivery-history', '◷', 'Consulta tu historial', 'Revisa las entregas finalizadas que estuvieron a tu cargo.'],
         ['profile', '⌂', 'Gestiona tu perfil', 'Ten visibles tus datos de contacto para coordinar.'],
       ],
       sections: {
@@ -812,6 +858,14 @@ function RoleDashboard({
         onCheckout={onCartCheckout}
         onContinue={() => setActiveTab('offers')}
       />
+    }
+
+    if (user.role === 'transporter' && activeTab === 'deliveries') {
+      return <TransporterOrdersPage user={user} />
+    }
+
+    if (user.role === 'transporter' && activeTab === 'delivery-history') {
+      return <TransporterOrdersPage user={user} history />
     }
 
     if (activeTab === 'profile') {
